@@ -4,8 +4,8 @@ use clipfarmer6700::{
     Service, ServiceDependencies,
     adapters::{
         DryRunPublisher, FfmpegRenderer, FfmpegSignalExtractor, FfmpegVisualSampler,
-        GptAudioAnalyzer, LocalObjectStore, LocalWhisper, ObjectStore, OpenAiEditorial, Publisher,
-        S3CommandStore, TwitchCapture, TwitchChatCapture,
+        GptAudioAnalyzer, LocalObjectStore, ObjectStore, OpenAiEditorial, Publisher,
+        S3CommandStore, ScribbleTranscriber, TwitchCapture, TwitchChatCapture,
     },
     config::Config,
     domain::{ChannelProfile, OutcomeMetrics},
@@ -165,14 +165,15 @@ async fn main() -> Result<()> {
 }
 
 fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
-    let transcriber = Arc::new(LocalWhisper {
-        ffmpeg: cfg.media.ffmpeg_path.clone(),
-        executable: cfg.whisper.executable.clone(),
-        model_path: cfg.whisper.model_path.clone(),
-        work_dir: cfg.data_dir.join("whisper"),
-        threads: cfg.whisper.threads,
-        language: cfg.whisper.language.clone(),
-    });
+    let transcriber = Arc::new(ScribbleTranscriber::new(
+        cfg.media.ffmpeg_path.clone(),
+        &cfg.scribble.model_path,
+        &cfg.scribble.vad_model_path,
+        cfg.data_dir.join("scribble"),
+        &cfg.scribble.language,
+        cfg.scribble.enable_vad,
+        cfg.scribble.incremental_min_window_seconds,
+    )?);
     let visual_sampler = Arc::new(FfmpegVisualSampler {
         executable: cfg.media.ffmpeg_path.clone(),
     });

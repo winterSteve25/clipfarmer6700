@@ -17,11 +17,13 @@ streamlink_path = "streamlink"
 chat_downloader_path = "chat_downloader"
 frame_interval_seconds = 1
 
-[whisper]
-executable = "whisper-cli"
+[scribble]
 model_path = "models/ggml-large-v3-turbo.bin"
-threads = 4
+vad_model_path = "models/ggml-silero-v6.2.0.bin"
+enable_vad = true
 language = "auto"
+# Observer slices are shorter than this, so Scribble normally performs one inference per slice.
+incremental_min_window_seconds = 30
 
 [openai]
 api_key_env = "OPENAI_API_KEY"

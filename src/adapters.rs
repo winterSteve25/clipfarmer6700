@@ -12,12 +12,15 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use scribble::{Opts, OutputType, Scribble, WhisperBackend};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex},
 };
 use tokio::io::AsyncWriteExt;
 
@@ -72,18 +75,50 @@ pub trait Publisher: Send + Sync {
     ) -> Result<Outcome>;
 }
 
-#[derive(Debug, Clone)]
-pub struct LocalWhisper {
+pub struct ScribbleTranscriber {
     pub ffmpeg: PathBuf,
-    pub executable: PathBuf,
-    pub model_path: PathBuf,
     pub work_dir: PathBuf,
-    pub threads: usize,
-    pub language: String,
+    engine: Arc<Mutex<Scribble<WhisperBackend>>>,
+    language: Option<String>,
+    enable_vad: bool,
+    incremental_min_window_seconds: usize,
+}
+
+impl ScribbleTranscriber {
+    pub fn new(
+        ffmpeg: PathBuf,
+        model_path: &Path,
+        vad_model_path: &Path,
+        work_dir: PathBuf,
+        language: &str,
+        enable_vad: bool,
+        incremental_min_window_seconds: usize,
+    ) -> Result<Self> {
+        let model_path = model_path
+            .to_str()
+            .context("Scribble model path is not valid UTF-8")?;
+        let vad_model_path = vad_model_path
+            .to_str()
+            .context("Scribble VAD model path is not valid UTF-8")?;
+        let engine = Scribble::new([model_path], vad_model_path)
+            .context("initialize embedded Scribble transcription model")?;
+        let language = match language.trim() {
+            "" | "auto" => None,
+            language => Some(language.to_owned()),
+        };
+        Ok(Self {
+            ffmpeg,
+            work_dir,
+            engine: Arc::new(Mutex::new(engine)),
+            language,
+            enable_vad,
+            incremental_min_window_seconds: incremental_min_window_seconds.max(1),
+        })
+    }
 }
 
 #[async_trait]
-impl Transcriber for LocalWhisper {
+impl Transcriber for ScribbleTranscriber {
     async fn transcribe(
         &self,
         input_path: &str,
@@ -96,7 +131,6 @@ impl Transcriber for LocalWhisper {
         fs::create_dir_all(&self.work_dir)?;
         let id = uuid::Uuid::new_v4();
         let wav_path = self.work_dir.join(format!("{id}.wav"));
-        let output_prefix = self.work_dir.join(format!("{id}"));
         let ffmpeg = tokio::process::Command::new(&self.ffmpeg)
             .args(["-y", "-v", "error", "-ss"])
             .arg(seconds(start_ms))
@@ -106,97 +140,110 @@ impl Transcriber for LocalWhisper {
             .arg(&wav_path)
             .output()
             .await
-            .context("extract Whisper audio")?;
+            .context("extract audio for Scribble")?;
         ensure!(
             ffmpeg.status.success(),
             "ffmpeg audio extraction failed: {}",
             String::from_utf8_lossy(&ffmpeg.stderr)
         );
-        let whisper = tokio::process::Command::new(&self.executable)
-            .args(["-m"])
-            .arg(&self.model_path)
-            .args(["-f"])
-            .arg(&wav_path)
-            .args(["-oj", "-of"])
-            .arg(&output_prefix)
-            .args(["-t", &self.threads.to_string(), "-l", &self.language])
-            .output()
-            .await
-            .context("run local whisper.cpp")?;
+
+        let engine = self.engine.clone();
+        let transcribe_path = wav_path.clone();
+        let opts = Opts {
+            model_key: None,
+            enable_translate_to_english: false,
+            enable_voice_activity_detection: self.enable_vad,
+            language: self.language.clone(),
+            output_type: OutputType::Json,
+            incremental_min_window_seconds: self.incremental_min_window_seconds,
+        };
+        let transcription = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let input = fs::File::open(&transcribe_path).with_context(|| {
+                format!("open Scribble audio input {}", transcribe_path.display())
+            })?;
+            let mut output = Vec::new();
+            let engine = engine
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Scribble transcription lock was poisoned"))?;
+            engine
+                .transcribe(input, &mut output, &opts)
+                .context("transcribe audio with embedded Scribble")?;
+            Ok(output)
+        })
+        .await
+        .context("Scribble transcription worker panicked");
         let _ = fs::remove_file(&wav_path);
-        ensure!(
-            whisper.status.success(),
-            "whisper.cpp failed: {}",
-            String::from_utf8_lossy(&whisper.stderr)
-        );
-        let json_path = output_prefix.with_extension("json");
-        let raw = fs::read(&json_path).context("read whisper JSON")?;
-        let _ = fs::remove_file(&json_path);
-        parse_whisper_json(&raw, session_id, start_ms, end_ms)
+        parse_scribble_json(&transcription??, session_id, start_ms, end_ms)
     }
 }
 
-fn parse_whisper_json(
+#[derive(Debug, Deserialize)]
+struct ScribbleJsonSegment {
+    start_seconds: f64,
+    end_seconds: f64,
+    text: String,
+    #[serde(default)]
+    tokens: Vec<ScribbleJsonToken>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScribbleJsonToken {
+    probability: f64,
+}
+
+fn parse_scribble_json(
     raw: &[u8],
     session_id: &str,
     window_start_ms: i64,
     window_end_ms: i64,
 ) -> Result<Vec<TranscriptSegment>> {
-    let value: Value = serde_json::from_slice(raw).context("parse whisper JSON")?;
-    let items = value
-        .get("transcription")
-        .or_else(|| value.get("segments"))
-        .and_then(Value::as_array)
-        .context("whisper JSON has no transcription segments")?;
+    let items: Vec<ScribbleJsonSegment> =
+        serde_json::from_slice(raw).context("parse Scribble JSON")?;
     let mut segments = Vec::new();
     for item in items {
-        let text = item
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
+        let text = item.text.trim();
         if text.is_empty() {
             continue;
         }
-        let offsets = item.get("offsets").unwrap_or(item);
-        let from = offsets
-            .get("from")
-            .or_else(|| offsets.get("start"))
-            .and_then(number_as_i64)
-            .unwrap_or(0);
-        let to = offsets
-            .get("to")
-            .or_else(|| offsets.get("end"))
-            .and_then(number_as_i64)
-            .unwrap_or(window_end_ms - window_start_ms);
-        // whisper.cpp reports offsets in milliseconds in JSON; decimal seconds are also accepted.
-        let relative_start = normalize_whisper_offset(from, window_end_ms - window_start_ms);
-        let relative_end = normalize_whisper_offset(to, window_end_ms - window_start_ms);
+        let relative_start = seconds_to_millis(item.start_seconds);
+        let relative_end = seconds_to_millis(item.end_seconds);
+        let confidence = token_confidence(&item.tokens);
+        let start_ms = (window_start_ms + relative_start).clamp(window_start_ms, window_end_ms);
+        let end_ms = (window_start_ms + relative_end).clamp(window_start_ms, window_end_ms);
+        if end_ms <= start_ms {
+            continue;
+        }
         segments.push(TranscriptSegment {
             session_id: session_id.to_owned(),
-            start_ms: (window_start_ms + relative_start).clamp(window_start_ms, window_end_ms),
-            end_ms: (window_start_ms + relative_end).clamp(window_start_ms, window_end_ms),
+            start_ms,
+            end_ms,
             text: text.to_owned(),
-            confidence: item.get("confidence").and_then(Value::as_f64),
-            no_speech_probability: item.get("no_speech_probability").and_then(Value::as_f64),
+            confidence,
+            no_speech_probability: None,
             is_final: true,
         });
     }
     Ok(segments)
 }
 
-fn number_as_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().map(|number| (number * 1_000.0) as i64))
+fn seconds_to_millis(seconds: f64) -> i64 {
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds * 1_000.0).round() as i64
+    } else {
+        0
+    }
 }
 
-fn normalize_whisper_offset(offset: i64, window_ms: i64) -> i64 {
-    if offset > window_ms.saturating_mul(2) {
-        // Some builds expose centiseconds.
-        offset.saturating_mul(10)
+fn token_confidence(tokens: &[ScribbleJsonToken]) -> Option<f64> {
+    let probabilities = tokens
+        .iter()
+        .map(|token| token.probability)
+        .filter(|probability| probability.is_finite() && (0.0..=1.0).contains(probability))
+        .collect::<Vec<_>>();
+    if probabilities.is_empty() {
+        None
     } else {
-        offset
+        Some(probabilities.iter().sum::<f64>() / probabilities.len() as f64)
     }
 }
 
@@ -947,11 +994,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_current_whisper_json_shape() {
-        let raw = br#"{"transcription":[{"text":"hello","offsets":{"from":100,"to":900}}]}"#;
-        let segments = parse_whisper_json(raw, "s", 10_000, 12_000).unwrap();
+    fn parses_scribble_json_and_averages_token_confidence() {
+        let raw = br#"[{"start_seconds":0.1,"end_seconds":0.9,"text":"hello","tokens":[{"probability":0.8},{"probability":1.0}]}]"#;
+        let segments = parse_scribble_json(raw, "s", 10_000, 12_000).unwrap();
         assert_eq!(segments[0].start_ms, 10_100);
         assert_eq!(segments[0].end_ms, 10_900);
+        assert_eq!(segments[0].confidence, Some(0.9));
     }
 
     #[tokio::test]

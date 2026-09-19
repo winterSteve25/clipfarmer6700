@@ -13,8 +13,8 @@ pub struct Config {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub media: MediaConfig,
-    #[serde(default)]
-    pub whisper: WhisperConfig,
+    #[serde(default, alias = "whisper")]
+    pub scribble: ScribbleConfig,
     #[serde(default)]
     pub openai: OpenAiConfig,
     #[serde(default)]
@@ -124,37 +124,43 @@ impl Default for MediaConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct WhisperConfig {
-    #[serde(default = "default_whisper_executable")]
-    pub executable: PathBuf,
-    #[serde(default = "default_whisper_model")]
+pub struct ScribbleConfig {
+    #[serde(default = "default_scribble_model")]
     pub model_path: PathBuf,
-    #[serde(default = "default_whisper_threads")]
-    pub threads: usize,
-    #[serde(default = "default_whisper_language")]
+    #[serde(default = "default_scribble_vad_model")]
+    pub vad_model_path: PathBuf,
+    #[serde(default = "default_scribble_vad")]
+    pub enable_vad: bool,
+    #[serde(default = "default_scribble_language")]
     pub language: String,
+    #[serde(default = "default_scribble_window")]
+    pub incremental_min_window_seconds: usize,
 }
 
-fn default_whisper_executable() -> PathBuf {
-    PathBuf::from("whisper-cli")
-}
-fn default_whisper_model() -> PathBuf {
+fn default_scribble_model() -> PathBuf {
     PathBuf::from("models/ggml-large-v3-turbo.bin")
 }
-fn default_whisper_threads() -> usize {
-    4
+fn default_scribble_vad_model() -> PathBuf {
+    PathBuf::from("models/ggml-silero-v6.2.0.bin")
 }
-fn default_whisper_language() -> String {
+fn default_scribble_vad() -> bool {
+    true
+}
+fn default_scribble_language() -> String {
     "auto".to_owned()
 }
+fn default_scribble_window() -> usize {
+    30
+}
 
-impl Default for WhisperConfig {
+impl Default for ScribbleConfig {
     fn default() -> Self {
         Self {
-            executable: default_whisper_executable(),
-            model_path: default_whisper_model(),
-            threads: default_whisper_threads(),
-            language: default_whisper_language(),
+            model_path: default_scribble_model(),
+            vad_model_path: default_scribble_vad_model(),
+            enable_vad: default_scribble_vad(),
+            language: default_scribble_language(),
+            incremental_min_window_seconds: default_scribble_window(),
         }
     }
 }
@@ -333,6 +339,18 @@ impl Config {
         ensure!(
             self.worker.queue_capacity > 0,
             "queue capacity must be positive"
+        );
+        ensure!(
+            !self.scribble.model_path.as_os_str().is_empty(),
+            "Scribble model path must not be empty"
+        );
+        ensure!(
+            !self.scribble.vad_model_path.as_os_str().is_empty(),
+            "Scribble VAD model path must not be empty"
+        );
+        ensure!(
+            self.scribble.incremental_min_window_seconds > 0,
+            "Scribble incremental window must be positive"
         );
         ensure!(
             self.openai.observer_model == "gpt-5.6-terra",

@@ -8,7 +8,7 @@ streamlink + chat_downloader
           ▼
 growing local capture and timestamped chat
           │
-          ├── local whisper.cpp transcript
+          ├── embedded Scribble transcript
           ├── ffmpeg chronological frames
           └── raw chat plus local signal summaries
                          │
@@ -30,7 +30,7 @@ The same path handles a live capture and an offline replay. Live scans include 1
 
 - Rust stable with edition 2024 support.
 - `ffmpeg` and `ffprobe`.
-- `whisper-cli` from whisper.cpp and a local `large-v3-turbo` GGML model.
+- Local `large-v3-turbo` Whisper and `silero-v6.2.0` VAD GGML model files for embedded [Scribble](https://github.com/itsmontoya/scribble).
 - `streamlink` and `chat_downloader` for live Twitch sessions.
 - `curl` for OpenAI and platform HTTP APIs.
 - `aws` CLI when `[staging].provider = "s3"`.
@@ -38,14 +38,27 @@ The same path handles a live capture and an offline replay. Live scans include 1
 
 GPT-5.6 Sol supports image input and structured output but not audio/video input, so the program sends ordered image samples and local transcripts through the Responses API. Candidate audio uses the Chat Completions audio-input format documented for `gpt-audio-1.5`.
 
+Download Scribble's configured local models once:
+
+```bash
+mkdir -p models
+curl --fail --location --output models/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+curl --fail --location --output models/ggml-silero-v6.2.0.bin \
+  https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin
+```
+
 ## Quick start
 
 ```bash
 cargo build --release
 ./target/release/clipfarmer init
-# Edit clipfarmer.toml, install local tools, and set OPENAI_API_KEY.
+# Edit clipfarmer.toml, place both local models under ./models, install local tools,
+# and set OPENAI_API_KEY.
 ./target/release/clipfarmer run --channel CHANNEL_LOGIN
 ```
+
+On Apple Silicon, build with `cargo build --release --features metal`. The `coreml`, `cuda`, and `vulkan` features expose Scribble's other acceleration backends. Scribble is embedded as a library: the Whisper model loads once when the service starts and is reused across transcription windows; no `whisper-cli` executable is installed or spawned.
 
 Replay a VOD through the identical editorial path:
 
@@ -53,7 +66,7 @@ Replay a VOD through the identical editorial path:
 ./target/release/clipfarmer replay --channel CHANNEL_LOGIN --input /absolute/path/vod.mp4
 ```
 
-For an offline plumbing test, `--deterministic-models` replaces only the hosted editorial/audio calls. Local Whisper, frame extraction, rendering, persistence, staging, and dry-run publishing still execute normally.
+For an offline plumbing test, `--deterministic-models` replaces only the hosted editorial/audio calls. Embedded Scribble transcription, frame extraction, rendering, persistence, staging, and dry-run publishing still execute normally.
 
 Other commands:
 
@@ -73,7 +86,7 @@ See [`clipfarmer.toml.example`](clipfarmer.toml.example). Model identifiers are 
 - Observer: `gpt-5.6-terra`
 - Director/editor/critic: `gpt-5.6-sol`
 - Candidate audio: `gpt-audio-1.5`
-- Continuous transcription: local `whisper-cli`, never a hosted transcription endpoint
+- Continuous transcription: embedded Scribble with a resident local Whisper model and local VAD, never a hosted transcription endpoint
 
 `publishers.dry_run = true` is the safe default. It creates deterministic remote IDs and exercises job recovery without network publication. Set it to `false` only after configuring the individual OAuth tokens.
 

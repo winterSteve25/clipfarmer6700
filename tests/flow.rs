@@ -7,7 +7,7 @@ use clipfarmer6700::{
         Transcriber, VisualSampler,
     },
     config::{
-        Config, MediaConfig, OpenAiConfig, PublisherConfig, StagingConfig, WhisperConfig,
+        Config, MediaConfig, OpenAiConfig, PublisherConfig, ScribbleConfig, StagingConfig,
         WorkerConfig,
     },
     domain::{
@@ -98,7 +98,7 @@ fn config(root: PathBuf) -> Config {
         data_dir: root,
         worker,
         media: MediaConfig::default(),
-        whisper: WhisperConfig::default(),
+        scribble: ScribbleConfig::default(),
         openai: OpenAiConfig::default(),
         staging: StagingConfig::default(),
         publishers: PublisherConfig::default(),

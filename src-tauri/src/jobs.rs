@@ -68,6 +68,7 @@ impl JobManager {
         app: AppHandle,
         source: JobSource,
         config: Config,
+        deterministic_models: bool,
     ) -> Result<JobSnapshot, String> {
         validate_source(&source)?;
         config
@@ -86,6 +87,7 @@ impl JobManager {
             captured_ms: None,
             completed_units: None,
             total_units: None,
+            transferred_bytes: None,
             summary: None,
         };
         let snapshot = JobSnapshot {
@@ -132,13 +134,18 @@ impl JobManager {
                 let event_manager = manager.clone();
                 let event_app = app.clone();
                 let event_id = id.clone();
-                let runner =
-                    LibraryRunner::load(config, job_root, model_paths, false, move |progress| {
+                let runner = LibraryRunner::load(
+                    config,
+                    job_root,
+                    model_paths,
+                    deterministic_models,
+                    move |progress| {
                         event_manager.update(&event_app, &event_id, |job| {
                             job.progress = progress;
                             record_progress(job);
                         });
-                    });
+                    },
+                );
                 let result = runner.and_then(|runner| {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -243,8 +250,14 @@ pub fn start_channel_clipping_job(
     state: State<'_, JobManager>,
     channel: String,
     config: Config,
+    deterministic_models: Option<bool>,
 ) -> Result<JobSnapshot, String> {
-    state.start(app, JobSource::Channel { channel }, config)
+    state.start(
+        app,
+        JobSource::Channel { channel },
+        config,
+        deterministic_models.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -253,8 +266,14 @@ pub fn start_vod_clipping_job(
     state: State<'_, JobManager>,
     vod_url: String,
     config: Config,
+    deterministic_models: Option<bool>,
 ) -> Result<JobSnapshot, String> {
-    state.start(app, JobSource::Vod { url: vod_url }, config)
+    state.start(
+        app,
+        JobSource::Vod { url: vod_url },
+        config,
+        deterministic_models.unwrap_or(false),
+    )
 }
 
 #[tauri::command]

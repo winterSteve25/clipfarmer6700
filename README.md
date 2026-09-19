@@ -5,8 +5,8 @@ The Tauri backend embeds ClipFarmer as the internal Rust library at
 
 Backend commands exposed to the future frontend:
 
-- `start_channel_clipping_job({ channel, config })`
-- `start_vod_clipping_job({ vodUrl, config })`
+- `start_channel_clipping_job({ channel, config, deterministicModels })`
+- `start_vod_clipping_job({ vodUrl, config, deterministicModels })`
 - `cancel_clipping_job({ jobId })`
 - `get_clipping_job({ jobId })`
 - `list_clipping_jobs()`
@@ -24,6 +24,11 @@ transcription model with `scribble.modelVariant`. Job data directories and
 model paths remain backend-controlled: every job receives an isolated directory
 under app data, while both Whisper models and the Silero VAD model are loaded
 from bundled resources.
+
+Set `deterministicModels` in the UI (or command arguments) to replace hosted
+editorial and audio calls with deterministic local implementations. Scribble
+transcription and the rest of the capture, rendering, staging, and publishing
+pipeline continue to run normally; no hosted-model API key is required.
 
 ## Start the app
 `npm run tauri dev`

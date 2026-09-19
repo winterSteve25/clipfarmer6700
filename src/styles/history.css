@@ -28,7 +28,7 @@
 .job-main span { overflow: hidden; margin-top: 5.5px; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .job-main b { color: #aaa2b7; font-weight: 600; }
 .job-progress { position: relative; width: min(396px, 100%); height: 4.4px; overflow: hidden; margin-top: 9.9px; border-radius: 108.9px; background: #292532; }
-.job-progress > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8050dd, #b381ff); transition: width .3s ease; }
+.job-progress > span { display: block; height: 100%; margin: 0; border-radius: inherit; background: linear-gradient(90deg, #8050dd, #b381ff); transition: width .3s ease; }
 .job-progress.indeterminate > span { width: 38%; animation: job-progress-sweep 1.15s ease-in-out infinite; }
 @keyframes job-progress-sweep { from { transform: translateX(-110%); } to { transform: translateX(290%); } }
 @media (prefers-reduced-motion: reduce) { .job-progress.indeterminate > span { animation-duration: 2.4s; } }

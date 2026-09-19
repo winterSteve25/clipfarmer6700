@@ -45,6 +45,18 @@ function formatDate(milliseconds: number) {
   }).format(new Date(milliseconds));
 }
 
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
+}
+
 function sourceLabel(job: JobSnapshot) {
   if (job.source.type === "channel") {
     return `twitch.tv/${job.source.channel ?? job.channel ?? "unknown"}`;
@@ -109,7 +121,7 @@ function JobCard({ job, now, onCancel }: { job: JobSnapshot; now: number; onCanc
     <summary>
       <span className={`job-state ${job.status}`}><Icon name={active ? "radio" : job.status === "completed" ? "check" : "x"}/></span>
       <span className="job-main"><strong>{jobName(job)}</strong><span><b>{phaseLabel(job.progress.phase)}</b> · {job.progress.message}</span>{active && <ProgressBar progress={job.progress}/>}</span>
-      <span className="job-quick-stats">{percent != null && <strong>{percent}%</strong>}<span>{formatDuration(runtime)} elapsed</span>{job.progress.capturedMs != null && <span>{formatDuration(job.progress.capturedMs)} captured</span>}</span>
+      <span className="job-quick-stats">{percent != null && <strong>{percent}%</strong>}{job.progress.transferredBytes != null && <strong>{formatBytes(job.progress.transferredBytes)} downloaded</strong>}<span>{formatDuration(runtime)} elapsed</span>{job.progress.capturedMs != null && <span>{formatDuration(job.progress.capturedMs)} captured</span>}</span>
       <span className={`status-badge ${job.status}`}>{job.status}</span>
       <span className="job-expand"><Icon name="chevron" size={16}/></span>
     </summary>

@@ -20,6 +20,7 @@ export type JobProgress = {
   capturedMs: number | null;
   completedUnits?: number | null;
   totalUnits?: number | null;
+  transferredBytes?: number | null;
   summary: RunSummary | null;
 };
 
@@ -38,6 +39,7 @@ export type JobSnapshot = {
 };
 
 export type ConfigState = {
+  deterministicModels: boolean;
   provider: Provider;
   apiKeyEnv: string;
   pollSeconds: number;

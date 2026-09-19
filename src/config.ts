@@ -1,6 +1,7 @@
 import type { ConfigState, DecisionOutput, PreviewTab, SourceMode } from "./types";
 
 export const DEFAULT_CONFIG: ConfigState = {
+  deterministicModels: false,
   provider: "gemini",
   apiKeyEnv: "GEMINI_API_KEY",
   pollSeconds: 10,

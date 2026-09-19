@@ -83,8 +83,8 @@ function App() {
         ? "start_channel_clipping_job"
         : "start_vod_clipping_job";
       const args = sourceMode === "channel"
-        ? { channel: sourceValue, config: backendConfig }
-        : { vodUrl: sourceValue, config: backendConfig };
+        ? { channel: sourceValue, config: backendConfig, deterministicModels: config.deterministicModels }
+        : { vodUrl: sourceValue, config: backendConfig, deterministicModels: config.deterministicModels };
       const job = await invoke<JobSnapshot>(command, args);
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
       setNav("jobs");

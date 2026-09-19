@@ -660,6 +660,15 @@ impl TwitchVodSource {
         url: &str,
         channel_override: Option<&str>,
     ) -> Result<PreparedTwitchVod> {
+        self.prepare_with_progress(url, channel_override, |_| {}).await
+    }
+
+    pub async fn prepare_with_progress(
+        &self,
+        url: &str,
+        channel_override: Option<&str>,
+        mut on_download_progress: impl FnMut(u64),
+    ) -> Result<PreparedTwitchVod> {
         let id = twitch_vod_id(url)?.to_owned();
         let canonical_url = format!("https://www.twitch.tv/videos/{id}");
         let cache_dir = self.cache_root.join(&id);
@@ -704,7 +713,8 @@ impl TwitchVodSource {
                 progress::bytes(size)
             ));
         } else {
-            self.download_media(&canonical_url, &media_path).await?;
+            self.download_media(&canonical_url, &media_path, &mut on_download_progress)
+                .await?;
         }
         let chat_path = media_path.with_extension("chat.jsonl");
         if chat_path.exists() {
@@ -742,11 +752,16 @@ impl TwitchVodSource {
         channel_from_streamlink_metadata(&metadata, expected_id)
     }
 
-    async fn download_media(&self, url: &str, destination: &Path) -> Result<()> {
+    async fn download_media(
+        &self,
+        url: &str,
+        destination: &Path,
+        on_progress: &mut impl FnMut(u64),
+    ) -> Result<()> {
         let temporary =
             destination.with_file_name(format!("source-{}.part.ts", uuid::Uuid::new_v4()));
         let download = ByteProgress::start("Downloading Twitch VOD", &temporary);
-        let output = tokio::process::Command::new(&self.streamlink)
+        let child = tokio::process::Command::new(&self.streamlink)
             .args(["--force", "--progress", "no", "--output"])
             .arg(&temporary)
             .arg(url)
@@ -754,9 +769,17 @@ impl TwitchVodSource {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output()
-            .await
+            .spawn()
             .context("download Twitch VOD with streamlink")?;
+        let mut wait = Box::pin(child.wait_with_output());
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let output = loop {
+            tokio::select! {
+                result = &mut wait => break result.context("wait for Twitch VOD download")?,
+                _ = interval.tick() => on_progress(fs::metadata(&temporary).map_or(0, |metadata| metadata.len())),
+            }
+        };
         if !output.status.success() {
             download.failed(format!("streamlink exited with {}", output.status));
             let _ = fs::remove_file(&temporary);
@@ -770,6 +793,7 @@ impl TwitchVodSource {
             "streamlink produced an empty Twitch VOD"
         );
         let transferred = fs::metadata(&temporary)?.len();
+        on_progress(transferred);
         fs::rename(&temporary, destination)?;
         download.done_with_size(transferred, destination.display().to_string());
         Ok(())
@@ -1170,6 +1194,39 @@ mod tests {
             channel_from_streamlink_metadata(&metadata, "123456789").unwrap(),
             "twitchdev"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reports_vod_download_byte_progress() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("clipfarmer-progress-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let streamlink = root.join("streamlink");
+        fs::write(
+            &streamlink,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nprintf 'half' > \"$output\"\nsleep 1\nprintf 'done' >> \"$output\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&streamlink, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = TwitchVodSource {
+            streamlink,
+            chat_downloader: root.join("unused-chat-downloader"),
+            cache_root: root.join("cache"),
+        };
+        let destination = root.join("source.ts");
+        let mut samples = Vec::new();
+        source
+            .download_media("https://www.twitch.tv/videos/123456789", &destination, &mut |bytes| {
+                samples.push(bytes);
+            })
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"halfdone");
+        assert!(samples.iter().any(|&bytes| bytes > 0 && bytes < 8));
+        assert_eq!(samples.last(), Some(&8));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

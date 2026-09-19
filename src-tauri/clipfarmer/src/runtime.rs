@@ -43,6 +43,7 @@ pub struct JobProgress {
     pub captured_ms: Option<i64>,
     pub completed_units: Option<usize>,
     pub total_units: Option<usize>,
+    pub transferred_bytes: Option<u64>,
     pub summary: Option<RunSummaryDto>,
 }
 
@@ -177,7 +178,9 @@ impl LibraryRunner {
             cache_root: self.config.data_dir.join("vods"),
         };
         let prepared = tokio::select! {
-            result = source.prepare(url, None) => result?,
+            result = source.prepare_with_progress(url, None, |transferred_bytes| {
+                self.report_download_progress(transferred_bytes);
+            }) => result?,
             _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
         };
         self.report(
@@ -367,7 +370,21 @@ impl LibraryRunner {
             captured_ms,
             completed_units: None,
             total_units: None,
+            transferred_bytes: None,
             summary: summary.map(RunSummaryDto::from),
+        });
+    }
+
+    fn report_download_progress(&self, transferred_bytes: u64) {
+        (self.progress)(JobProgress {
+            phase: "preparing_vod".to_owned(),
+            message: "Downloading the Twitch VOD".to_owned(),
+            elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            captured_ms: None,
+            completed_units: None,
+            total_units: None,
+            transferred_bytes: Some(transferred_bytes),
+            summary: None,
         });
     }
 
@@ -387,6 +404,7 @@ impl LibraryRunner {
             captured_ms,
             completed_units: Some(completed_units),
             total_units: Some(total_units),
+            transferred_bytes: None,
             summary: summary.map(RunSummaryDto::from),
         });
     }

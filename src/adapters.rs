@@ -615,6 +615,196 @@ impl TwitchCapture {
 }
 
 #[derive(Debug, Clone)]
+pub struct PreparedTwitchVod {
+    pub id: String,
+    pub channel_login: String,
+    pub media_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct TwitchVodSource {
+    pub streamlink: PathBuf,
+    pub chat_downloader: PathBuf,
+    pub cache_root: PathBuf,
+}
+
+impl TwitchVodSource {
+    pub async fn prepare(
+        &self,
+        url: &str,
+        channel_override: Option<&str>,
+    ) -> Result<PreparedTwitchVod> {
+        let id = twitch_vod_id(url)?.to_owned();
+        let canonical_url = format!("https://www.twitch.tv/videos/{id}");
+        let cache_dir = self.cache_root.join(&id);
+        fs::create_dir_all(&cache_dir)?;
+        let channel_path = cache_dir.join("channel.txt");
+        let cached_channel = fs::read_to_string(&channel_path)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| valid_twitch_login(value));
+        let resolved_channel = match cached_channel {
+            Some(channel) => channel,
+            None => self.resolve_channel(&canonical_url, &id).await?,
+        };
+        let channel_login = match channel_override {
+            Some(channel) => {
+                ensure!(valid_twitch_login(channel), "invalid Twitch channel login");
+                ensure!(
+                    resolved_channel.eq_ignore_ascii_case(channel),
+                    "provided channel does not match the Twitch VOD channel"
+                );
+                channel.to_ascii_lowercase()
+            }
+            None => resolved_channel,
+        };
+        fs::write(&channel_path, format!("{channel_login}\n"))?;
+
+        let media_path = cache_dir.join("source.ts");
+        if !fs::metadata(&media_path).is_ok_and(|metadata| metadata.len() > 0) {
+            self.download_media(&canonical_url, &media_path).await?;
+        }
+        let chat_path = media_path.with_extension("chat.jsonl");
+        if !chat_path.exists() {
+            self.download_chat(&canonical_url, &chat_path).await?;
+        }
+        Ok(PreparedTwitchVod {
+            id,
+            channel_login,
+            media_path,
+        })
+    }
+
+    async fn resolve_channel(&self, url: &str, expected_id: &str) -> Result<String> {
+        let output = tokio::process::Command::new(&self.streamlink)
+            .arg("--json")
+            .arg(url)
+            .output()
+            .await
+            .context("resolve Twitch VOD metadata with streamlink")?;
+        ensure!(
+            output.status.success(),
+            "streamlink could not resolve Twitch VOD metadata: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value =
+            serde_json::from_slice(&output.stdout).context("streamlink metadata is not JSON")?;
+        channel_from_streamlink_metadata(&metadata, expected_id)
+    }
+
+    async fn download_media(&self, url: &str, destination: &Path) -> Result<()> {
+        let temporary =
+            destination.with_file_name(format!("source-{}.part.ts", uuid::Uuid::new_v4()));
+        let output = tokio::process::Command::new(&self.streamlink)
+            .args(["--force", "--progress", "no", "--output"])
+            .arg(&temporary)
+            .arg(url)
+            .arg("best")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("download Twitch VOD with streamlink")?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&temporary);
+            anyhow::bail!(
+                "streamlink could not download Twitch VOD: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        ensure!(
+            fs::metadata(&temporary).is_ok_and(|metadata| metadata.len() > 0),
+            "streamlink produced an empty Twitch VOD"
+        );
+        fs::rename(&temporary, destination)?;
+        Ok(())
+    }
+
+    async fn download_chat(&self, url: &str, destination: &Path) -> Result<()> {
+        let temporary =
+            destination.with_file_name(format!("chat-{}.part.jsonl", uuid::Uuid::new_v4()));
+        let output = tokio::process::Command::new(&self.chat_downloader)
+            .arg(url)
+            .args(["--output"])
+            .arg(&temporary)
+            .args(["--message_groups", "messages"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("download Twitch VOD chat")?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&temporary);
+            anyhow::bail!(
+                "chat_downloader could not download Twitch VOD chat: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if temporary.exists() {
+            fs::rename(&temporary, destination)?;
+        } else {
+            fs::write(destination, [])?;
+        }
+        Ok(())
+    }
+}
+
+fn twitch_vod_id(url: &str) -> Result<&str> {
+    ensure!(!url.contains(['\0', '\r', '\n']), "unsafe Twitch VOD URL");
+    let rest = url
+        .strip_prefix("https://")
+        .context("Twitch VOD URL must use HTTPS")?;
+    let (host, path) = rest.split_once('/').context("Twitch VOD URL has no path")?;
+    ensure!(
+        matches!(
+            host.to_ascii_lowercase().as_str(),
+            "twitch.tv" | "www.twitch.tv"
+        ),
+        "VOD URL must use twitch.tv"
+    );
+    let clean_path = path.split(['?', '#']).next().unwrap_or_default();
+    let mut segments = clean_path.split('/').filter(|segment| !segment.is_empty());
+    ensure!(segments.next() == Some("videos"), "invalid Twitch VOD URL");
+    let id = segments.next().context("Twitch VOD URL omitted its ID")?;
+    ensure!(
+        segments.next().is_none() && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid Twitch VOD ID"
+    );
+    Ok(id)
+}
+
+fn valid_twitch_login(login: &str) -> bool {
+    !login.is_empty()
+        && login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn channel_from_streamlink_metadata(value: &Value, expected_id: &str) -> Result<String> {
+    let metadata = value
+        .get("metadata")
+        .context("streamlink response omitted Twitch VOD metadata")?;
+    let id = metadata
+        .get("id")
+        .and_then(Value::as_str)
+        .context("streamlink metadata omitted the Twitch VOD ID")?;
+    ensure!(
+        id == expected_id,
+        "streamlink resolved a different Twitch VOD"
+    );
+    let author = metadata
+        .get("author")
+        .and_then(Value::as_str)
+        .context("streamlink metadata omitted the Twitch channel login")?
+        .to_ascii_lowercase();
+    ensure!(
+        valid_twitch_login(&author),
+        "streamlink returned an invalid Twitch channel login"
+    );
+    Ok(author)
+}
+
+#[derive(Debug, Clone)]
 pub struct TwitchChatCapture {
     pub executable: PathBuf,
 }
@@ -865,5 +1055,70 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn validates_twitch_vod_urls_and_metadata() {
+        assert_eq!(
+            twitch_vod_id("https://www.twitch.tv/videos/123456789?t=1h2m").unwrap(),
+            "123456789"
+        );
+        assert!(twitch_vod_id("https://example.com/videos/123456789").is_err());
+        assert!(twitch_vod_id("https://www.twitch.tv/videos/not-a-number").is_err());
+        let metadata = serde_json::json!({
+            "metadata":{"id":"123456789","author":"TwitchDev"}
+        });
+        assert_eq!(
+            channel_from_streamlink_metadata(&metadata, "123456789").unwrap(),
+            "twitchdev"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepares_and_reuses_a_cached_twitch_vod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("clipfarmer-vod-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let streamlink = root.join("streamlink");
+        fs::write(
+            &streamlink,
+            "#!/bin/sh\nif [ \"$1\" = \"--json\" ]; then\n  printf '%s\\n' '{\"metadata\":{\"id\":\"123456789\",\"author\":\"TwitchDev\"}}'\n  exit 0\nfi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nprintf 'fake-vod' > \"$output\"\n",
+        )
+        .unwrap();
+        let chat_downloader = root.join("chat_downloader");
+        fs::write(
+            &chat_downloader,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nprintf '%s\\n' '{\"time_in_seconds\":1,\"message\":\"hello\"}' > \"$output\"\n",
+        )
+        .unwrap();
+        for executable in [&streamlink, &chat_downloader] {
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let source = TwitchVodSource {
+            streamlink,
+            chat_downloader,
+            cache_root: root.join("cache"),
+        };
+        let prepared = source
+            .prepare("https://www.twitch.tv/videos/123456789", None)
+            .await
+            .unwrap();
+        assert_eq!(prepared.channel_login, "twitchdev");
+        assert_eq!(fs::read(&prepared.media_path).unwrap(), b"fake-vod");
+        assert!(prepared.media_path.with_extension("chat.jsonl").exists());
+
+        let cached = TwitchVodSource {
+            streamlink: root.join("missing-streamlink"),
+            chat_downloader: root.join("missing-chat-downloader"),
+            cache_root: root.join("cache"),
+        }
+        .prepare("https://www.twitch.tv/videos/123456789", None)
+        .await
+        .unwrap();
+        assert_eq!(cached.channel_login, "twitchdev");
+        assert_eq!(cached.media_path, prepared.media_path);
+        let _ = fs::remove_dir_all(root);
     }
 }

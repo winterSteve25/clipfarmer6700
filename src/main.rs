@@ -5,7 +5,7 @@ use clipfarmer6700::{
     adapters::{
         DryRunPublisher, FfmpegRenderer, FfmpegSignalExtractor, FfmpegVisualSampler,
         LocalObjectStore, ObjectStore, Publisher, S3CommandStore, ScribbleTranscriber,
-        TwitchCapture, TwitchChatCapture,
+        TwitchCapture, TwitchChatCapture, TwitchVodSource,
     },
     config::{Config, ModelProvider},
     domain::{ChannelProfile, OutcomeMetrics},
@@ -46,12 +46,19 @@ enum Command {
         deterministic_models: bool,
     },
     Replay {
-        #[arg(long)]
-        channel: String,
-        #[arg(long)]
-        input: String,
+        /// Twitch login associated with a local input; optional consistency check for --vod.
+        #[arg(long, required_unless_present = "vod")]
+        channel: Option<String>,
+        /// Local media file to replay.
+        #[arg(long, required_unless_present = "vod", conflicts_with = "vod")]
+        input: Option<String>,
+        /// Public Twitch VOD URL to download, cache, and replay.
+        #[arg(long, conflicts_with = "input")]
+        vod: Option<String>,
+        /// Analyze only this many milliseconds; the full Twitch VOD is still downloaded.
         #[arg(long)]
         duration_ms: Option<i64>,
+        /// Replace hosted editorial and audio models with deterministic test implementations.
         #[arg(long)]
         deterministic_models: bool,
     },
@@ -110,9 +117,35 @@ async fn main() -> Result<()> {
         Command::Replay {
             channel,
             input,
+            vod,
             duration_ms,
             deterministic_models,
         } => {
+            let (channel, input) = match vod {
+                Some(url) => {
+                    let prepared = TwitchVodSource {
+                        streamlink: cfg.media.streamlink_path.clone(),
+                        chat_downloader: cfg.media.chat_downloader_path.clone(),
+                        cache_root: cfg.data_dir.join("vods"),
+                    }
+                    .prepare(&url, channel.as_deref())
+                    .await?;
+                    eprintln!(
+                        "using cached Twitch VOD {} from channel {} at {}",
+                        prepared.id,
+                        prepared.channel_login,
+                        prepared.media_path.display()
+                    );
+                    (
+                        prepared.channel_login,
+                        prepared.media_path.to_string_lossy().into_owned(),
+                    )
+                }
+                None => (
+                    channel.context("--channel is required with --input")?,
+                    input.context("--input or --vod is required")?,
+                ),
+            };
             let duration = match duration_ms {
                 Some(value) => value,
                 None => probe_duration_ms(&cfg, &input).await?,

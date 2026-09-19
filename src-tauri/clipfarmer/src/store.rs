@@ -1,3 +1,7 @@
+//! SQLite persistence for sessions, candidates, decisions, jobs, posts, and profiles.
+//! This module makes pipeline progress durable, idempotent, and recoverable after failures.
+//! It owns database initialization and state changes so retry behavior remains consistent.
+
 use crate::domain::{
     Candidate, ChannelProfile, ClipState, EditManifest, EditorialDecision, Outcome, OutcomeMetrics,
     TranscriptSegment,
@@ -525,4 +529,91 @@ fn row_to_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<Candidate> {
             rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
         })?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(id: &str) -> Candidate {
+        Candidate {
+            id: id.to_owned(),
+            session_id: "session".to_owned(),
+            channel_id: "channel".to_owned(),
+            source: "test".to_owned(),
+            source_id: "source".to_owned(),
+            start_ms: 0,
+            end_ms: 10_000,
+            payoff_ms: Some(10_000),
+            transcript: "test transcript".to_owned(),
+            observer_confidence: 0.9,
+            state: ClipState::Ready,
+        }
+    }
+
+    fn store() -> Store {
+        let path =
+            std::env::temp_dir().join(format!("clipfarmer-test-{}.db", uuid::Uuid::new_v4()));
+        Store::open(path).unwrap()
+    }
+
+    #[test]
+    fn candidate_upsert_is_idempotent_and_transition_requires_expected_state() {
+        let store = store();
+        let value = candidate("candidate");
+        store
+            .create_session("session", "channel", "test-input.mp4")
+            .unwrap();
+
+        assert!(store.upsert_candidate(&value).unwrap());
+        assert!(
+            !store
+                .upsert_candidate(&Candidate {
+                    id: "different-id".to_owned(),
+                    ..value.clone()
+                })
+                .unwrap()
+        );
+        assert!(
+            store
+                .transition("candidate", ClipState::Emerging, ClipState::Ready)
+                .is_err()
+        );
+        assert!(
+            store
+                .transition("candidate", ClipState::Ready, ClipState::Accepted)
+                .unwrap()
+        );
+        assert_eq!(
+            store.get_candidate("candidate").unwrap().unwrap().state,
+            ClipState::Accepted
+        );
+    }
+
+    #[test]
+    fn completed_publish_job_is_persisted_and_not_pending() {
+        let store = store();
+        let value = candidate("candidate");
+        store
+            .create_session("session", "channel", "test-input.mp4")
+            .unwrap();
+        store.upsert_candidate(&value).unwrap();
+        store
+            .enqueue_publish_job("job", "candidate", "fake", "fake:key")
+            .unwrap();
+
+        let outcome = Outcome {
+            candidate_id: "candidate".to_owned(),
+            platform: "fake".to_owned(),
+            remote_id: "remote".to_owned(),
+            status: "published".to_owned(),
+            idempotency_key: "fake:key".to_owned(),
+            url: Some("https://example.test/remote".to_owned()),
+        };
+        store.complete_publish_job(&outcome).unwrap();
+
+        assert!(store.publish_job_done("candidate", "fake").unwrap());
+        assert!(store.all_publish_jobs_done("candidate").unwrap());
+        assert!(store.pending_candidates(10).unwrap().is_empty());
+    }
 }

@@ -1,3 +1,7 @@
+//! Platform-specific publishing implementations behind the common publisher contract.
+//! This module isolates API credentials, request formats, and platform outcomes.
+//! It lets the pipeline submit to multiple destinations while treating each result uniformly.
+
 use crate::{
     adapters::{Publisher, curl_json, run_curl},
     domain::{Candidate, Outcome},
@@ -54,8 +58,7 @@ impl Publisher for YouTubePublisher {
             .arg(format!("X-Upload-Content-Length: {}", fs::metadata(local_asset)?.len()))
             .args(["--header", "X-Upload-Content-Type: video/mp4", "--data-binary"])
             .arg(metadata.to_string())
-            .arg("--")
-            .arg("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status");
+            .args(["--url", "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"]);
         let initiate = run_curl(command, &self.access_token)
             .await
             .context("start YouTube resumable upload")?;
@@ -392,8 +395,7 @@ async fn curl_upload(
     command
         .arg("--data-binary")
         .arg(format!("@{local_path}"))
-        .arg("--")
-        .arg(url);
+        .args(["--url", url]);
     let output = run_curl(command, token).await.context("upload media")?;
     ensure!(
         output.status.success(),
@@ -428,5 +430,26 @@ mod tests {
         assert!(!valid_twitch_login("some-streamer?redirect=1"));
         let response = serde_json::json!({"data":[{"id":"123","login":"other"}]});
         assert!(broadcaster_id_from_response(&response, "expected").is_err());
+    }
+}
+
+#[cfg(all(test, feature = "twitch-api-tests"))]
+mod twitch_api_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn can_lookup_a_real_twitch_channel() {
+        let access_token = std::env::var("TWITCH_ACCESS_TOKEN")
+            .expect("TWITCH_ACCESS_TOKEN is required for twitch-api-tests");
+        let client_id = std::env::var("TWITCH_CLIENT_ID")
+            .expect("TWITCH_CLIENT_ID is required for twitch-api-tests");
+        let channel = std::env::var("TWITCH_TEST_CHANNEL")
+            .expect("TWITCH_TEST_CHANNEL is required for twitch-api-tests");
+        let publisher = TwitchClipPublisher::new(access_token, client_id);
+
+        let broadcaster_id = publisher.broadcaster_id(&channel).await.unwrap();
+
+        assert!(!broadcaster_id.is_empty());
+        assert!(broadcaster_id.bytes().all(|byte| byte.is_ascii_digit()));
     }
 }

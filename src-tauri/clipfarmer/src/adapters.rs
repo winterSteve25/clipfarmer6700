@@ -1,4 +1,6 @@
 //! Concrete boundaries for local media tools and hosted model calls.
+//! It keeps subprocesses, storage backends, capture sources, and publishers replaceable.
+//! The pipeline depends on these traits rather than on individual external tools.
 use crate::{
     domain::{Candidate, EditManifest, LocalSignals, Outcome, TranscriptSegment, VisualSample},
     manifest::{render_ass, validate_manifest, validate_object_key, validate_safe_path},
@@ -6,6 +8,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use scribble::{Opts, OutputType, Scribble, WhisperBackend};
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,8 +18,10 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::io::AsyncWriteExt;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[async_trait]
 pub trait Transcriber: Send + Sync {
@@ -870,6 +875,92 @@ pub struct TwitchChatCapture {
     pub executable: PathBuf,
 }
 
+/// Captures public live chat through Twitch IRC over WebSocket.
+/// This avoids the deprecated GraphQL path used by the external chat_downloader CLI.
+pub async fn capture_twitch_chat(
+    channel: &str,
+    output_path: &Path,
+    duration_seconds: u64,
+) -> Result<usize> {
+    ensure!(valid_twitch_login(channel), "invalid Twitch channel login");
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut output = tokio::fs::File::create(output_path).await?;
+    let (mut socket, _) = connect_async("wss://irc-ws.chat.twitch.tv:443")
+        .await
+        .context("connect to Twitch IRC")?;
+    let nickname = format!(
+        "justinfan{}",
+        uuid::Uuid::new_v4().as_u128() % 1_000_000_000
+    );
+    for command in [
+        "CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership".to_owned(),
+        "PASS SCHMOOPIIE".to_owned(),
+        format!("NICK {nickname}"),
+        format!("JOIN #{channel}"),
+    ] {
+        socket.send(Message::Text(command.into())).await?;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_seconds);
+    let mut message_count = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(message) = tokio::time::timeout(remaining, socket.next())
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        match message? {
+            Message::Text(text) => {
+                for line in text.lines() {
+                    if line.starts_with("PING ") {
+                        socket
+                            .send(Message::Text(line.replacen("PING", "PONG", 1).into()))
+                            .await?;
+                        continue;
+                    }
+                    let Some((prefix, payload)) = line.split_once(" PRIVMSG ") else {
+                        continue;
+                    };
+                    let Some((_, chat_text)) = payload.split_once(" :") else {
+                        continue;
+                    };
+                    let author = prefix
+                        .split_once(" :")
+                        .map(|(_, value)| value)
+                        .or_else(|| prefix.strip_prefix(':'))
+                        .and_then(|value| value.split('!').next())
+                        .unwrap_or("anonymous");
+                    let record = serde_json::json!({
+                        "time_in_seconds": tokio::time::Instant::now()
+                            .duration_since(deadline - Duration::from_secs(duration_seconds))
+                            .as_secs_f64(),
+                        "message": chat_text,
+                        "author": author,
+                    });
+                    output.write_all(record.to_string().as_bytes()).await?;
+                    output.write_all(b"\n").await?;
+                    message_count += 1;
+                }
+            }
+            Message::Ping(payload) => {
+                socket.send(Message::Pong(payload)).await?;
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    output.flush().await?;
+    Ok(message_count)
+}
+
 impl TwitchChatCapture {
     pub fn start(&self, channel: &str, output_path: &Path) -> Result<tokio::process::Child> {
         ensure!(
@@ -1013,7 +1104,7 @@ async fn curl_json_authenticated(
     } else {
         None
     };
-    command.arg("--").arg(url);
+    command.args(["--url", url]);
     let output_result = match secret_header {
         Some((name, value)) => run_curl_with_secret_header(command, name, value).await,
         None => {
@@ -1101,6 +1192,79 @@ mod tests {
         assert_eq!(segments[0].start_ms, 10_100);
         assert_eq!(segments[0].end_ms, 10_900);
         assert_eq!(segments[0].confidence, Some(0.9));
+    }
+
+    #[test]
+    fn transcript_parser_clamps_to_the_requested_window_and_skips_empty_text() {
+        let raw = br#"[
+            {"start_seconds":-1.0,"end_seconds":0.5,"text":" before ","tokens":[]},
+            {"start_seconds":0.5,"end_seconds":0.5,"text":"zero length","tokens":[]},
+            {"start_seconds":1.0,"end_seconds":3.0,"text":"   ","tokens":[]},
+            {"start_seconds":1.0,"end_seconds":4.0,"text":"after","tokens":[]}
+        ]"#;
+        let segments = parse_scribble_json(raw, "session", 10_000, 12_000).unwrap();
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!((segments[0].start_ms, segments[0].end_ms), (10_000, 10_500));
+        assert_eq!((segments[1].start_ms, segments[1].end_ms), (11_000, 12_000));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn visual_sampler_turns_fake_ffmpeg_frames_into_timestamped_samples() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("clipfarmer-frames-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nfor arg in \"$@\"; do pattern=\"$arg\"; done\nfirst=$(printf '%s' \"$pattern\" | sed 's/%06d/000001/')\nsecond=$(printf '%s' \"$pattern\" | sed 's/%06d/000002/')\n: > \"$first\"\n: > \"$second\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let input = root.join("input.mp4");
+        fs::write(&input, b"fake media").unwrap();
+        let output_dir = root.join("frames");
+
+        let samples = FfmpegVisualSampler { executable }
+            .sample(input.to_str().unwrap(), &output_dir, 5_000, 15_000, 5)
+            .await
+            .unwrap();
+
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].at_ms, 5_000);
+        assert_eq!(samples[1].at_ms, 10_000);
+        assert!(samples.iter().all(|sample| sample.region == "full_frame"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signal_extractor_accepts_audio_stats_from_a_fake_ffmpeg_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("clipfarmer-signals-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '[Parsed_volumedetect_0 @ 0x1] mean_volume: -30.0 dB' >&2\nprintf '%s\\n' '[Parsed_showinfo_0 @ 0x1] n: 0' '[Parsed_showinfo_0 @ 0x1] n: 1' >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let input = root.join("input.mp4");
+        fs::write(&input, b"fake media").unwrap();
+
+        let signals = FfmpegSignalExtractor { executable }
+            .extract(input.to_str().unwrap(), 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!((signals.audio_energy - 0.5).abs() < f64::EPSILON);
+        assert!((signals.scene_change_rate - 0.1).abs() < f64::EPSILON);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1213,5 +1377,260 @@ mod tests {
     #[test]
     fn signal_parsing_rejects_output_without_audio_stats() {
         assert!(parse_signal_diagnostics("Conversion failed!", 12.0).is_none());
+    }
+}
+
+#[cfg(all(test, feature = "twitch-ingestion-tests"))]
+mod twitch_ingestion_tests {
+    use super::*;
+
+    fn required(name: &str) -> String {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("{name} is required for twitch-ingestion-tests"))
+    }
+
+    #[tokio::test]
+    async fn pulls_vod_chat_and_media_evidence_with_local_tools() {
+        let vod_url = required("TWITCH_TEST_VOD_URL");
+        let streamlink =
+            std::env::var("CLIPFARMER_STREAMLINK").unwrap_or_else(|_| "streamlink".to_owned());
+        let chat_downloader = std::env::var("CLIPFARMER_CHAT_DOWNLOADER")
+            .unwrap_or_else(|_| "chat_downloader".to_owned());
+        let ffmpeg = std::env::var("CLIPFARMER_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
+        let model_path = PathBuf::from(required("CLIPFARMER_WHISPER_MODEL"));
+        let vad_model_path = PathBuf::from(required("CLIPFARMER_VAD_MODEL"));
+        let root =
+            std::env::temp_dir().join(format!("clipfarmer-live-test-{}", uuid::Uuid::new_v4()));
+        let cache_root = root.join("vod-cache");
+        let prepared = TwitchVodSource {
+            streamlink: PathBuf::from(streamlink),
+            chat_downloader: PathBuf::from(chat_downloader),
+            cache_root,
+        }
+        .prepare(&vod_url, None)
+        .await
+        .unwrap();
+
+        assert!(fs::metadata(&prepared.media_path).unwrap().len() > 0);
+        let chat_path = prepared.media_path.with_extension("chat.jsonl");
+        assert!(chat_path.exists());
+        let chat_lines = fs::read_to_string(&chat_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert!(chat_lines > 0, "Twitch VOD returned no chat records");
+
+        let start_ms = std::env::var("CLIPFARMER_TEST_START_MS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let duration_ms = std::env::var("CLIPFARMER_TEST_WINDOW_MS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(30_000);
+        let input_path = prepared.media_path.to_string_lossy().into_owned();
+        let frame_dir = root.join("frames");
+        let frames = FfmpegVisualSampler {
+            executable: PathBuf::from(&ffmpeg),
+        }
+        .sample(&input_path, &frame_dir, start_ms, start_ms + duration_ms, 5)
+        .await
+        .unwrap();
+        assert!(!frames.is_empty());
+
+        let signals = FfmpegSignalExtractor {
+            executable: PathBuf::from(&ffmpeg),
+        }
+        .extract(&input_path, start_ms, start_ms + duration_ms)
+        .await
+        .unwrap();
+        assert!((0.0..=1.0).contains(&signals.audio_energy));
+        assert!(signals.scene_change_rate.is_finite());
+
+        let transcriber = ScribbleTranscriber::new(
+            PathBuf::from(ffmpeg),
+            &model_path,
+            &vad_model_path,
+            root.join("transcription"),
+            "auto",
+            true,
+            30,
+        )
+        .unwrap();
+        let transcript = transcriber
+            .transcribe(
+                &input_path,
+                "real-twitch-test",
+                start_ms,
+                start_ms + duration_ms,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !transcript.is_empty(),
+            "selected VOD window returned no transcript"
+        );
+        assert!(
+            transcript
+                .iter()
+                .all(|segment| segment.end_ms > segment.start_ms)
+        );
+        eprintln!(
+            "Twitch ingestion evidence: media={} bytes, chat={} bytes, frames={}, transcript_segments={}, audio_energy={:.3}, scene_changes_per_second={:.3}",
+            fs::metadata(&prepared.media_path).unwrap().len(),
+            fs::metadata(&chat_path).unwrap().len(),
+            frames.len(),
+            transcript.len(),
+            signals.audio_energy,
+            signals.scene_change_rate
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, feature = "twitch-live-ingestion-tests"))]
+mod twitch_live_ingestion_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn required(name: &str) -> String {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("{name} is required for twitch-live-ingestion-tests"))
+    }
+
+    async fn captured_duration_ms(ffprobe: &Path, input: &Path) -> Result<i64> {
+        let output = tokio::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(input)
+            .output()
+            .await
+            .context("probe live capture duration")?;
+        ensure!(
+            output.status.success(),
+            "ffprobe could not read live capture"
+        );
+        let seconds: f64 = String::from_utf8(output.stdout)?.trim().parse()?;
+        ensure!(
+            seconds.is_finite() && seconds > 0.0,
+            "live capture has no duration"
+        );
+        Ok((seconds * 1_000.0) as i64)
+    }
+
+    #[tokio::test]
+    async fn captures_a_short_live_window_and_gathers_local_evidence() {
+        let channel = required("TWITCH_TEST_CHANNEL");
+        let streamlink = PathBuf::from(
+            std::env::var("CLIPFARMER_STREAMLINK").unwrap_or_else(|_| "streamlink".to_owned()),
+        );
+        let ffmpeg = PathBuf::from(
+            std::env::var("CLIPFARMER_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned()),
+        );
+        let ffprobe = PathBuf::from(
+            std::env::var("CLIPFARMER_FFPROBE").unwrap_or_else(|_| "ffprobe".to_owned()),
+        );
+        let model_path = PathBuf::from(required("CLIPFARMER_WHISPER_MODEL"));
+        let vad_model_path = PathBuf::from(required("CLIPFARMER_VAD_MODEL"));
+        let capture_seconds = std::env::var("CLIPFARMER_LIVE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(45);
+        assert!(
+            capture_seconds >= 10,
+            "live capture must run for at least 10 seconds"
+        );
+
+        let root = std::env::temp_dir().join(format!("clipfarmer-live-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let media_path = root.join("capture.ts");
+        let chat_path = root.join("capture.chat.jsonl");
+        let mut video = TwitchCapture { streamlink }
+            .start(&channel, &media_path)
+            .await
+            .unwrap();
+        let chat_channel = channel.clone();
+        let chat_output = chat_path.clone();
+        let chat_task = tokio::spawn(async move {
+            capture_twitch_chat(&chat_channel, &chat_output, capture_seconds).await
+        });
+
+        tokio::time::sleep(Duration::from_secs(capture_seconds)).await;
+        let _ = video.kill().await;
+        let _ = video.wait().await;
+        let chat_lines = chat_task.await.unwrap().unwrap();
+
+        assert!(fs::metadata(&media_path).unwrap().len() > 0);
+        let duration_ms = captured_duration_ms(&ffprobe, &media_path).await.unwrap();
+        assert!(duration_ms >= 5_000);
+        assert!(chat_path.exists());
+        assert!(chat_lines > 0, "live capture returned no chat records");
+
+        let input_path = media_path.to_string_lossy().into_owned();
+        let frames = FfmpegVisualSampler {
+            executable: ffmpeg.clone(),
+        }
+        .sample(&input_path, &root.join("frames"), 0, duration_ms, 5)
+        .await
+        .unwrap();
+        assert!(!frames.is_empty());
+        let signals = FfmpegSignalExtractor {
+            executable: ffmpeg.clone(),
+        }
+        .extract(&input_path, 0, duration_ms)
+        .await
+        .unwrap();
+        let transcriber = ScribbleTranscriber::new(
+            ffmpeg,
+            &model_path,
+            &vad_model_path,
+            root.join("transcription"),
+            "auto",
+            true,
+            30,
+        )
+        .unwrap();
+        let transcript = transcriber
+            .transcribe(&input_path, "real-twitch-live-test", 0, duration_ms)
+            .await
+            .unwrap();
+        assert!(
+            !transcript.is_empty(),
+            "live capture returned no transcript"
+        );
+        if std::env::var_os("CLIPFARMER_KEEP_LIVE_ARTIFACTS").is_some() {
+            fs::write(
+                root.join("transcript.json"),
+                serde_json::to_vec_pretty(&transcript).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                root.join("signals.json"),
+                serde_json::to_vec_pretty(&signals).unwrap(),
+            )
+            .unwrap();
+        }
+        eprintln!(
+            "Live Twitch evidence: media={} bytes, duration={} ms, chat_records={}, frames={}, transcript_segments={}, audio_energy={:.3}, scene_changes_per_second={:.3}",
+            fs::metadata(&media_path).unwrap().len(),
+            duration_ms,
+            chat_lines,
+            frames.len(),
+            transcript.len(),
+            signals.audio_energy,
+            signals.scene_change_rate
+        );
+        if std::env::var_os("CLIPFARMER_KEEP_LIVE_ARTIFACTS").is_some() {
+            eprintln!("Live Twitch artifacts kept at {}", root.display());
+        } else {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! Interactive terminals get animated progress bars. Redirected stderr keeps stable line-oriented
 //! output, and stdout remains available for machine-readable command results.
+//! These helpers keep operational feedback separate from the backend's domain and persistence logic.
 
 use std::{
     fs,

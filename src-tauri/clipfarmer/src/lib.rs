@@ -2,6 +2,7 @@
 //!
 //! This crate contains the pipeline that was formerly driven only by the
 //! `clipfarmer` CLI, plus a cancellable library runtime suitable for GUI hosts.
+//! Its public modules expose the backend contracts, orchestration services, and host-facing job API.
 
 pub mod adapters;
 pub mod config;

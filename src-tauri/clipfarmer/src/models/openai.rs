@@ -1,3 +1,7 @@
+//! OpenAI implementations of editorial review and candidate audio analysis.
+//! This module connects provider-neutral traits to OpenAI APIs.
+//! It translates evidence and audio into structured decisions without exposing provider details upstream.
+
 use super::{base64, extract_candidate_audio, select_visuals, validate_audio_annotation};
 use crate::{
     adapters::curl_json,

@@ -21,7 +21,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -124,19 +124,16 @@ pub struct LibraryRunner {
 
 impl LibraryRunner {
     pub fn load(
-        config_path: impl AsRef<Path>,
+        mut config: Config,
         data_dir: PathBuf,
         model_paths: ModelPaths,
         deterministic_models: bool,
         progress: impl Fn(JobProgress) + Send + Sync + 'static,
     ) -> Result<Self> {
-        let config_path = config_path.as_ref();
-        load_dotenv(config_path)?;
-        let mut config = Config::load(config_path)?;
-        resolve_config_paths(&mut config, config_path);
         config.data_dir = data_dir;
         config.scribble.model_path = model_paths.transcription;
         config.scribble.vad_model_path = model_paths.voice_activity_detection;
+        config.validate()?;
         fs::create_dir_all(config.data_dir.join("outputs"))?;
         Ok(Self {
             config,
@@ -437,25 +434,6 @@ fn add_summary(total: &mut RunSummary, pass: &RunSummary) {
     total.candidates_rejected += pass.candidates_rejected;
     total.posts_completed += pass.posts_completed;
     total.publish_failures += pass.publish_failures;
-}
-
-fn resolve_config_paths(config: &mut Config, config_path: &Path) {
-    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
-    if config.scribble.model_path.is_relative() {
-        config.scribble.model_path = base.join(&config.scribble.model_path);
-    }
-    if config.scribble.vad_model_path.is_relative() {
-        config.scribble.vad_model_path = base.join(&config.scribble.vad_model_path);
-    }
-}
-
-fn load_dotenv(config_path: &Path) -> Result<()> {
-    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
-    match dotenvy::from_path(base.join(".env")) {
-        Ok(()) => Ok(()),
-        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("load ClipFarmer environment"),
-    }
 }
 
 async fn probe_duration_ms(config: &Config, input: &str) -> Result<i64> {

@@ -1,11 +1,9 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde::Deserialize;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Config {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -31,7 +29,24 @@ fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            worker: WorkerConfig::default(),
+            media: MediaConfig::default(),
+            scribble: ScribbleConfig::default(),
+            models: ModelSelectionConfig::default(),
+            openai: OpenAiConfig::default(),
+            gemini: GeminiConfig::default(),
+            staging: StagingConfig::default(),
+            publishers: PublisherConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct WorkerConfig {
     #[serde(default = "default_poll")]
     pub poll_seconds: u64,
@@ -50,7 +65,7 @@ pub struct WorkerConfig {
 }
 
 fn default_poll() -> u64 {
-    5
+    10
 }
 fn default_attempts() -> u32 {
     4
@@ -86,6 +101,7 @@ impl Default for WorkerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct MediaConfig {
     #[serde(default = "default_ffmpeg")]
     pub ffmpeg_path: PathBuf,
@@ -128,6 +144,7 @@ impl Default for MediaConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ScribbleConfig {
     #[serde(default = "default_scribble_model")]
     pub model_path: PathBuf,
@@ -142,7 +159,7 @@ pub struct ScribbleConfig {
 }
 
 fn default_scribble_model() -> PathBuf {
-    PathBuf::from("models/ggml-large-v3-turbo.bin")
+    PathBuf::from("models/ggml-large-v3-turbo-q5_0.bin")
 }
 fn default_scribble_vad_model() -> PathBuf {
     PathBuf::from("models/ggml-silero-v6.2.0.bin")
@@ -172,19 +189,21 @@ impl Default for ScribbleConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
-    #[default]
     #[serde(rename = "openai", alias = "open_ai")]
     OpenAi,
+    #[default]
     Gemini,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ModelSelectionConfig {
     #[serde(default)]
     pub provider: ModelProvider,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct OpenAiConfig {
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
@@ -227,6 +246,7 @@ impl Default for OpenAiConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct GeminiConfig {
     #[serde(default = "default_gemini_api_key_env")]
     pub api_key_env: String,
@@ -269,6 +289,7 @@ impl Default for GeminiConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct StagingConfig {
     #[serde(default = "default_staging_provider")]
     pub provider: String,
@@ -308,14 +329,15 @@ impl Default for StagingConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct PublisherConfig {
     #[serde(default = "default_true")]
     pub dry_run: bool,
     #[serde(default = "default_true")]
     pub youtube: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub instagram: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub tiktok_drafts: bool,
     #[serde(default)]
     pub twitch_clips: bool,
@@ -335,6 +357,9 @@ pub struct PublisherConfig {
 
 fn default_true() -> bool {
     true
+}
+fn default_false() -> bool {
+    false
 }
 fn youtube_token_env() -> String {
     "YOUTUBE_ACCESS_TOKEN".to_owned()
@@ -359,8 +384,8 @@ impl Default for PublisherConfig {
         Self {
             dry_run: true,
             youtube: true,
-            instagram: true,
-            tiktok_drafts: true,
+            instagram: false,
+            tiktok_drafts: false,
             twitch_clips: false,
             youtube_token_env: youtube_token_env(),
             instagram_token_env: instagram_token_env(),
@@ -373,14 +398,6 @@ impl Default for PublisherConfig {
 }
 
 impl Config {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let raw = fs::read_to_string(path.as_ref())
-            .with_context(|| format!("read config {}", path.as_ref().display()))?;
-        let config: Self = toml::from_str(&raw).context("parse TOML config")?;
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.worker.observer_step_seconds > 0,
@@ -461,9 +478,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn example_config_validates_for_both_model_providers() {
-        let mut config: Config =
-            toml::from_str(include_str!("../clipfarmer.toml.example")).unwrap();
+    fn default_config_validates_for_both_model_providers() {
+        let mut config = Config::default();
         for provider in [ModelProvider::OpenAi, ModelProvider::Gemini] {
             config.models.provider = provider;
             config.validate().unwrap();
@@ -472,10 +488,48 @@ mod tests {
 
     #[test]
     fn gemini_model_names_cannot_modify_the_request_url() {
-        let mut config: Config =
-            toml::from_str(include_str!("../clipfarmer.toml.example")).unwrap();
+        let mut config = Config::default();
         config.models.provider = ModelProvider::Gemini;
         config.gemini.observer_model = "gemini-3.8-flash?key=leak".to_owned();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn defaults_match_the_former_example_configuration() {
+        let config = Config::default();
+        assert_eq!(config.worker.poll_seconds, 10);
+        assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert!(config.publishers.dry_run);
+        assert!(config.publishers.youtube);
+        assert!(!config.publishers.instagram);
+        assert!(!config.publishers.tiktok_drafts);
+        assert!(!config.publishers.twitch_clips);
+        assert_eq!(
+            config.scribble.model_path,
+            PathBuf::from("models/ggml-large-v3-turbo-q5_0.bin")
+        );
+    }
+
+    #[test]
+    fn empty_frontend_config_uses_example_defaults() {
+        let config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(config.worker.poll_seconds, 10);
+        assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert!(config.publishers.youtube);
+        assert!(!config.publishers.instagram);
+    }
+
+    #[test]
+    fn partial_frontend_config_preserves_unspecified_defaults() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "worker": { "pollSeconds": 30 },
+            "publishers": { "instagram": true }
+        }))
+        .unwrap();
+        assert_eq!(config.worker.poll_seconds, 30);
+        assert_eq!(config.worker.observer_step_seconds, 6);
+        assert!(config.publishers.youtube);
+        assert!(config.publishers.instagram);
+        assert!(!config.publishers.tiktok_drafts);
     }
 }

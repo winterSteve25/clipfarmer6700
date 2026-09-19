@@ -1,4 +1,5 @@
 use clipfarmer::{
+    config::Config,
     runtime::{is_cancelled, RunSummaryDto},
     CancellationHandle, JobProgress, JobSource, LibraryRunner, ModelPaths,
 };
@@ -47,30 +48,30 @@ struct JobEntry {
 
 #[derive(Clone)]
 pub struct JobManager {
-    config_path: PathBuf,
     jobs_root: PathBuf,
     model_paths: ModelPaths,
     jobs: Arc<Mutex<HashMap<String, JobEntry>>>,
 }
 
 impl JobManager {
-    pub fn new(config_path: PathBuf, jobs_root: PathBuf, model_paths: ModelPaths) -> Self {
+    pub fn new(jobs_root: PathBuf, model_paths: ModelPaths) -> Self {
         Self {
-            config_path,
             jobs_root,
             model_paths,
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn start(&self, app: AppHandle, source: JobSource) -> Result<JobSnapshot, String> {
+    fn start(
+        &self,
+        app: AppHandle,
+        source: JobSource,
+        config: Config,
+    ) -> Result<JobSnapshot, String> {
         validate_source(&source)?;
-        if !self.config_path.is_file() {
-            return Err(format!(
-                "ClipFarmer config not found at {}. Set CLIPFARMER_CONFIG to its path.",
-                self.config_path.display()
-            ));
-        }
+        config
+            .validate()
+            .map_err(|error| format!("invalid clipping configuration: {error:#}"))?;
         let id = uuid::Uuid::new_v4().to_string();
         let job_root = self.jobs_root.join(&id);
         let output_dir = job_root.join("outputs");
@@ -111,7 +112,6 @@ impl JobManager {
         emit_snapshot(&app, &snapshot);
 
         let manager = self.clone();
-        let config_path = self.config_path.clone();
         let model_paths = self.model_paths.clone();
         std::thread::Builder::new()
             .name(format!("clipfarmer-{id}"))
@@ -126,17 +126,12 @@ impl JobManager {
                 let event_manager = manager.clone();
                 let event_app = app.clone();
                 let event_id = id.clone();
-                let runner = LibraryRunner::load(
-                    &config_path,
-                    job_root,
-                    model_paths,
-                    false,
-                    move |progress| {
+                let runner =
+                    LibraryRunner::load(config, job_root, model_paths, false, move |progress| {
                         event_manager.update(&event_app, &event_id, |job| {
                             job.progress = progress;
                         });
-                    },
-                );
+                    });
                 let result = runner.and_then(|runner| {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -236,8 +231,9 @@ pub fn start_channel_clipping_job(
     app: AppHandle,
     state: State<'_, JobManager>,
     channel: String,
+    config: Config,
 ) -> Result<JobSnapshot, String> {
-    state.start(app, JobSource::Channel { channel })
+    state.start(app, JobSource::Channel { channel }, config)
 }
 
 #[tauri::command]
@@ -245,8 +241,9 @@ pub fn start_vod_clipping_job(
     app: AppHandle,
     state: State<'_, JobManager>,
     vod_url: String,
+    config: Config,
 ) -> Result<JobSnapshot, String> {
-    state.start(app, JobSource::Vod { url: vod_url })
+    state.start(app, JobSource::Vod { url: vod_url }, config)
 }
 
 #[tauri::command]
@@ -272,11 +269,10 @@ pub fn list_clipping_jobs(state: State<'_, JobManager>) -> Result<Vec<JobSnapsho
 }
 
 pub fn manager_for(app: &AppHandle) -> Result<JobManager, Box<dyn std::error::Error>> {
-    let config_path = config_path(app)?;
     let model_paths = bundled_model_paths(app)?;
     let jobs_root = app.path().app_data_dir()?.join("clipfarmer").join("jobs");
     fs::create_dir_all(&jobs_root)?;
-    Ok(JobManager::new(config_path, jobs_root, model_paths))
+    Ok(JobManager::new(jobs_root, model_paths))
 }
 
 fn bundled_model_paths(app: &AppHandle) -> Result<ModelPaths, Box<dyn std::error::Error>> {
@@ -299,19 +295,6 @@ fn bundled_model_paths(app: &AppHandle) -> Result<ModelPaths, Box<dyn std::error
         }
     }
     Ok(paths)
-}
-
-fn config_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(path) = std::env::var_os("CLIPFARMER_CONFIG") {
-        return Ok(PathBuf::from(path));
-    }
-    let config_dir = app.path().app_config_dir()?;
-    fs::create_dir_all(&config_dir)?;
-    let path = config_dir.join("clipfarmer.toml");
-    if !path.exists() {
-        fs::write(&path, include_str!("../clipfarmer.toml"))?;
-    }
-    Ok(path)
 }
 
 fn validate_source(source: &JobSource) -> Result<(), String> {

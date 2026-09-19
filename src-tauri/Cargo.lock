@@ -573,7 +573,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "dotenvy",
  "rusqlite",
  "scribble",
  "serde",
@@ -581,7 +580,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
- "toml 0.8.2",
  "uuid",
 ]
 
@@ -948,12 +946,6 @@ dependencies = [
  "selectors",
  "tendril",
 ]
-
-[[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dpi"

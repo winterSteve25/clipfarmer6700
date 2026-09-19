@@ -1,0 +1,56 @@
+# Secrets are environment-variable names only. Tokens are never written to this file or SQLite.
+data_dir = "./data"
+
+[worker]
+poll_seconds = 10
+max_attempts = 4
+ring_minutes = 10
+observer_window_seconds = 12
+observer_step_seconds = 6
+maturation_delay_seconds = 20
+queue_capacity = 256
+
+[media]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+streamlink_path = "streamlink"
+chat_downloader_path = "chat_downloader"
+frame_interval_seconds = 1
+
+[whisper]
+executable = "whisper-cli"
+model_path = "models/ggml-large-v3-turbo.bin"
+threads = 4
+language = "auto"
+
+[openai]
+api_key_env = "OPENAI_API_KEY"
+observer_model = "gpt-5.6-terra"
+director_model = "gpt-5.6-sol"
+editor_model = "gpt-5.6-sol"
+critic_model = "gpt-5.6-sol"
+audio_model = "gpt-audio-1.5"
+
+# `local` is suitable for dry runs. Production Instagram publishing needs `s3` plus a public
+# HTTPS media URL; AWS CLI credentials provide access to any S3-compatible provider and generate
+# a one-hour presigned URL.
+[staging]
+provider = "local"
+bucket = "clipfarmer-artifacts"
+prefix = "staged"
+# public_base_url = "https://media.example.com"
+endpoint_env = "S3_ENDPOINT"
+
+[publishers]
+dry_run = true
+youtube = true
+instagram = true
+tiktok_drafts = true
+twitch_clips = false
+youtube_token_env = "YOUTUBE_ACCESS_TOKEN"
+instagram_token_env = "INSTAGRAM_ACCESS_TOKEN"
+instagram_account_env = "INSTAGRAM_ACCOUNT_ID"
+tiktok_token_env = "TIKTOK_ACCESS_TOKEN"
+twitch_token_env = "TWITCH_ACCESS_TOKEN"
+twitch_client_id_env = "TWITCH_CLIENT_ID"
+twitch_broadcaster_id_env = "TWITCH_BROADCASTER_ID"

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait EditorialModel: Send + Sync {
+    fn model_name(&self, stage: EditorialStage) -> &str;
+
     async fn decide(
         &self,
         stage: EditorialStage,
@@ -199,6 +201,21 @@ pub fn decision_schema() -> serde_json::Value {
     })
 }
 
+pub fn audio_annotation_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{
+            "emotional_arc":{"type":"string"},
+            "nonverbal_events":{"type":"array","items":{"type":"string"}},
+            "hook_ms":{"type":["integer","null"]},
+            "payoff_ms":{"type":["integer","null"]},
+            "confidence":{"type":"number","minimum":0,"maximum":1}
+        },
+        "required":["emotional_arc","nonverbal_events","hook_ms","payoff_ms","confidence"]
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DeterministicEditorial {
     pub accept: bool,
@@ -206,6 +223,10 @@ pub struct DeterministicEditorial {
 
 #[async_trait]
 impl EditorialModel for DeterministicEditorial {
+    fn model_name(&self, _stage: EditorialStage) -> &str {
+        "deterministic-editorial"
+    }
+
     async fn decide(
         &self,
         stage: EditorialStage,

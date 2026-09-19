@@ -16,7 +16,11 @@ pub struct Config {
     #[serde(default, alias = "whisper")]
     pub scribble: ScribbleConfig,
     #[serde(default)]
+    pub models: ModelSelectionConfig,
+    #[serde(default)]
     pub openai: OpenAiConfig,
+    #[serde(default)]
+    pub gemini: GeminiConfig,
     #[serde(default)]
     pub staging: StagingConfig,
     #[serde(default)]
@@ -165,6 +169,21 @@ impl Default for ScribbleConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProvider {
+    #[default]
+    #[serde(rename = "openai", alias = "open_ai")]
+    OpenAi,
+    Gemini,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelSelectionConfig {
+    #[serde(default)]
+    pub provider: ModelProvider,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAiConfig {
     #[serde(default = "default_api_key_env")]
@@ -203,6 +222,48 @@ impl Default for OpenAiConfig {
             editor_model: default_sol_model(),
             critic_model: default_sol_model(),
             audio_model: default_audio_model(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiConfig {
+    #[serde(default = "default_gemini_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_gemini_observer_model")]
+    pub observer_model: String,
+    #[serde(default = "default_gemini_editorial_model")]
+    pub director_model: String,
+    #[serde(default = "default_gemini_editorial_model")]
+    pub editor_model: String,
+    #[serde(default = "default_gemini_editorial_model")]
+    pub critic_model: String,
+    #[serde(default = "default_gemini_audio_model")]
+    pub audio_model: String,
+}
+
+fn default_gemini_api_key_env() -> String {
+    "GEMINI_API_KEY".to_owned()
+}
+fn default_gemini_observer_model() -> String {
+    "gemini-3.8-flash".to_owned()
+}
+fn default_gemini_editorial_model() -> String {
+    "gemini-3.1-pro-preview".to_owned()
+}
+fn default_gemini_audio_model() -> String {
+    "gemini-3.8-flash".to_owned()
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_gemini_api_key_env(),
+            observer_model: default_gemini_observer_model(),
+            director_model: default_gemini_editorial_model(),
+            editor_model: default_gemini_editorial_model(),
+            critic_model: default_gemini_editorial_model(),
+            audio_model: default_gemini_audio_model(),
         }
     }
 }
@@ -352,28 +413,76 @@ impl Config {
             self.scribble.incremental_min_window_seconds > 0,
             "Scribble incremental window must be positive"
         );
-        ensure!(
-            self.openai.observer_model == "gpt-5.6-terra",
-            "observer model must be gpt-5.6-terra for this architecture"
-        );
-        ensure!(
-            [
-                &self.openai.director_model,
-                &self.openai.editor_model,
-                &self.openai.critic_model
-            ]
-            .iter()
-            .all(|model| model.as_str() == "gpt-5.6-sol"),
-            "director, editor, and critic must use gpt-5.6-sol"
-        );
-        ensure!(
-            self.openai.audio_model == "gpt-audio-1.5",
-            "audio model must be gpt-audio-1.5"
-        );
+        match self.models.provider {
+            ModelProvider::OpenAi => {
+                ensure!(
+                    self.openai.observer_model == "gpt-5.6-terra",
+                    "OpenAI observer model must be gpt-5.6-terra for this architecture"
+                );
+                ensure!(
+                    [
+                        &self.openai.director_model,
+                        &self.openai.editor_model,
+                        &self.openai.critic_model
+                    ]
+                    .iter()
+                    .all(|model| model.as_str() == "gpt-5.6-sol"),
+                    "OpenAI director, editor, and critic must use gpt-5.6-sol"
+                );
+                ensure!(
+                    self.openai.audio_model == "gpt-audio-1.5",
+                    "OpenAI audio model must be gpt-audio-1.5"
+                );
+            }
+            ModelProvider::Gemini => {
+                let models = [
+                    &self.gemini.observer_model,
+                    &self.gemini.director_model,
+                    &self.gemini.editor_model,
+                    &self.gemini.critic_model,
+                    &self.gemini.audio_model,
+                ];
+                ensure!(
+                    models.iter().all(|model| valid_gemini_model(model)),
+                    "Gemini model identifiers must start with gemini- and contain only letters, numbers, dots, underscores, or hyphens"
+                );
+            }
+        }
         Ok(())
     }
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("clipfarmer.sqlite3")
+    }
+}
+
+fn valid_gemini_model(model: &str) -> bool {
+    model.starts_with("gemini-")
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config_validates_for_both_model_providers() {
+        let mut config: Config =
+            toml::from_str(include_str!("../clipfarmer.toml.example")).unwrap();
+        for provider in [ModelProvider::OpenAi, ModelProvider::Gemini] {
+            config.models.provider = provider;
+            config.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn gemini_model_names_cannot_modify_the_request_url() {
+        let mut config: Config =
+            toml::from_str(include_str!("../clipfarmer.toml.example")).unwrap();
+        config.models.provider = ModelProvider::Gemini;
+        config.gemini.observer_model = "gemini-3.8-flash?key=leak".to_owned();
+        assert!(config.validate().is_err());
     }
 }

@@ -7,8 +7,8 @@ use clipfarmer6700::{
         Transcriber, VisualSampler,
     },
     config::{
-        Config, MediaConfig, OpenAiConfig, PublisherConfig, ScribbleConfig, StagingConfig,
-        WorkerConfig,
+        Config, GeminiConfig, MediaConfig, ModelSelectionConfig, OpenAiConfig, PublisherConfig,
+        ScribbleConfig, StagingConfig, WorkerConfig,
     },
     domain::{
         AudioAnnotation, Candidate, ChannelProfile, ClipState, EditorialDecision, EditorialStage,
@@ -99,7 +99,9 @@ fn config(root: PathBuf) -> Config {
         worker,
         media: MediaConfig::default(),
         scribble: ScribbleConfig::default(),
+        models: ModelSelectionConfig::default(),
         openai: OpenAiConfig::default(),
+        gemini: GeminiConfig::default(),
         staging: StagingConfig::default(),
         publishers: PublisherConfig::default(),
     }
@@ -144,6 +146,10 @@ struct CriticRejects;
 
 #[async_trait]
 impl EditorialModel for CriticRejects {
+    fn model_name(&self, _stage: EditorialStage) -> &str {
+        "critic-rejects-test"
+    }
+
     async fn decide(
         &self,
         stage: EditorialStage,

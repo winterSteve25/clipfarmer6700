@@ -25,6 +25,10 @@ language = "auto"
 # Observer slices are shorter than this, so Scribble normally performs one inference per slice.
 incremental_min_window_seconds = 30
 
+[models]
+# Choose `openai` or `gemini`.
+provider = "gemini"
+
 [openai]
 api_key_env = "OPENAI_API_KEY"
 observer_model = "gpt-5.6-terra"
@@ -32,6 +36,14 @@ director_model = "gpt-5.6-sol"
 editor_model = "gpt-5.6-sol"
 critic_model = "gpt-5.6-sol"
 audio_model = "gpt-audio-1.5"
+
+[gemini]
+api_key_env = "GEMINI_API_KEY"
+observer_model = "gemini-3.8-flash"
+director_model = "gemini-3.1-pro-preview"
+editor_model = "gemini-3.1-pro-preview"
+critic_model = "gemini-3.1-pro-preview"
+audio_model = "gemini-3.8-flash"
 
 # `local` is suitable for dry runs. Production Instagram publishing needs `s3` plus a public
 # HTTPS media URL; AWS CLI credentials provide access to any S3-compatible provider and generate

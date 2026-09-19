@@ -341,8 +341,11 @@ impl Service {
                 .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
                 .await?;
             crate::editorial::validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
-            self.store
-                .record_decision(&candidate.id, self.model_for_stage(stage), &decision)?;
+            self.store.record_decision(
+                &candidate.id,
+                self.editorial.model_name(stage),
+                &decision,
+            )?;
             decisions.push(decision);
         }
         let final_decision = decisions.last().cloned().expect("three decisions");
@@ -454,15 +457,6 @@ impl Service {
             anyhow::bail!("one or more publishers failed: {}", failures.join("; "));
         }
         Ok(outcomes)
-    }
-
-    fn model_for_stage(&self, stage: EditorialStage) -> &str {
-        match stage {
-            EditorialStage::Observer => &self.cfg.openai.observer_model,
-            EditorialStage::Director => &self.cfg.openai.director_model,
-            EditorialStage::Editor => &self.cfg.openai.editor_model,
-            EditorialStage::Critic => &self.cfg.openai.critic_model,
-        }
     }
 
     fn record_ring(&self, kind: &str, subject: &str, detail: serde_json::Value) -> Result<()> {

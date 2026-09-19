@@ -4,19 +4,28 @@ use clipfarmer6700::{
     Service, ServiceDependencies,
     adapters::{
         DryRunPublisher, FfmpegRenderer, FfmpegSignalExtractor, FfmpegVisualSampler,
-        GptAudioAnalyzer, LocalObjectStore, ObjectStore, OpenAiEditorial, Publisher,
-        S3CommandStore, ScribbleTranscriber, TwitchCapture, TwitchChatCapture,
+        LocalObjectStore, ObjectStore, Publisher, S3CommandStore, ScribbleTranscriber,
+        TwitchCapture, TwitchChatCapture,
     },
-    config::Config,
+    config::{Config, ModelProvider},
     domain::{ChannelProfile, OutcomeMetrics},
     editorial::{
         CandidateAudioAnalyzer, DeterministicAudioAnnotation, DeterministicEditorial,
         EditorialModel,
     },
+    models::{
+        gemini::{GeminiAudioAnalyzer, GeminiEditorial},
+        openai::{OpenAiAudioAnalyzer, OpenAiEditorial},
+    },
     publishers::{InstagramPublisher, TikTokDraftPublisher, TwitchClipPublisher, YouTubePublisher},
     store::Store,
 };
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 #[derive(Parser)]
 #[command(name = "clipfarmer", about = "Always-on multimodal Twitch clip editor")]
@@ -91,6 +100,7 @@ async fn main() -> Result<()> {
         println!("wrote {}", cli.config.display());
         return Ok(());
     }
+    load_dotenv(&cli.config)?;
     let cfg = Config::load(&cli.config)?;
     match cli.command {
         Command::Run {
@@ -164,6 +174,19 @@ async fn main() -> Result<()> {
     }
 }
 
+fn load_dotenv(config_path: &Path) -> Result<()> {
+    let config_dir = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let path = config_dir.join(".env");
+    match dotenvy::from_path(&path) {
+        Ok(()) => Ok(()),
+        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("load {}", path.display())),
+    }
+}
+
 fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
     let transcriber = Arc::new(ScribbleTranscriber::new(
         cfg.media.ffmpeg_path.clone(),
@@ -184,22 +207,44 @@ fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
                 Arc::new(DeterministicAudioAnnotation),
             )
         } else {
-            let api_key = read_secret(&cfg.openai.api_key_env)?;
-            (
-                Arc::new(OpenAiEditorial {
-                    api_key: api_key.clone(),
-                    observer_model: cfg.openai.observer_model.clone(),
-                    director_model: cfg.openai.director_model.clone(),
-                    editor_model: cfg.openai.editor_model.clone(),
-                    critic_model: cfg.openai.critic_model.clone(),
-                }),
-                Arc::new(GptAudioAnalyzer {
-                    api_key,
-                    model: cfg.openai.audio_model.clone(),
-                    ffmpeg: cfg.media.ffmpeg_path.clone(),
-                    work_dir: cfg.data_dir.join("audio-analysis"),
-                }),
-            )
+            match cfg.models.provider {
+                ModelProvider::OpenAi => {
+                    let api_key = read_secret(&cfg.openai.api_key_env)?;
+                    (
+                        Arc::new(OpenAiEditorial {
+                            api_key: api_key.clone(),
+                            observer_model: cfg.openai.observer_model.clone(),
+                            director_model: cfg.openai.director_model.clone(),
+                            editor_model: cfg.openai.editor_model.clone(),
+                            critic_model: cfg.openai.critic_model.clone(),
+                        }),
+                        Arc::new(OpenAiAudioAnalyzer {
+                            api_key,
+                            model: cfg.openai.audio_model.clone(),
+                            ffmpeg: cfg.media.ffmpeg_path.clone(),
+                            work_dir: cfg.data_dir.join("audio-analysis/openai"),
+                        }),
+                    )
+                }
+                ModelProvider::Gemini => {
+                    let api_key = read_secret(&cfg.gemini.api_key_env)?;
+                    (
+                        Arc::new(GeminiEditorial {
+                            api_key: api_key.clone(),
+                            observer_model: cfg.gemini.observer_model.clone(),
+                            director_model: cfg.gemini.director_model.clone(),
+                            editor_model: cfg.gemini.editor_model.clone(),
+                            critic_model: cfg.gemini.critic_model.clone(),
+                        }),
+                        Arc::new(GeminiAudioAnalyzer {
+                            api_key,
+                            model: cfg.gemini.audio_model.clone(),
+                            ffmpeg: cfg.media.ffmpeg_path.clone(),
+                            work_dir: cfg.data_dir.join("audio-analysis/gemini"),
+                        }),
+                    )
+                }
+            }
         };
     let object_store: Arc<dyn ObjectStore> = match cfg.staging.provider.as_str() {
         "local" => Arc::new(LocalObjectStore {
@@ -400,7 +445,13 @@ fn read_secret(variable: &str) -> Result<String> {
         !variable.is_empty(),
         "secret environment-variable name is empty"
     );
-    std::env::var(variable).with_context(|| format!("required secret {variable} is not set"))
+    let value = std::env::var(variable)
+        .with_context(|| format!("required secret {variable} is not set"))?;
+    ensure!(
+        !value.trim().is_empty(),
+        "required secret {variable} is empty"
+    );
+    Ok(value)
 }
 
 fn auth_status(cfg: &Config, platform: Platform) -> Result<()> {
@@ -420,7 +471,7 @@ fn auth_status(cfg: &Config, platform: Platform) -> Result<()> {
     for variable in variables {
         println!(
             "{variable}: {}",
-            if std::env::var_os(variable).is_some() {
+            if std::env::var(variable).is_ok_and(|value| !value.trim().is_empty()) {
                 "configured"
             } else {
                 "missing"

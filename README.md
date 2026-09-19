@@ -12,10 +12,10 @@ growing local capture and timestamped chat
           ├── ffmpeg chronological frames
           └── raw chat plus local signal summaries
                          │
-              Terra overlapping observer
+          selected-provider observer
                          │ 20-second maturation delay
                          ▼
-        GPT Audio annotation → Sol director → Sol editor → Sol critic
+       audio annotation → director → editor → independent critic
                          │ accepted only by critic
                          ▼
              ffmpeg vertical edit + captions
@@ -32,11 +32,11 @@ The same path handles a live capture and an offline replay. Live scans include 1
 - `ffmpeg` and `ffprobe`.
 - Local `large-v3-turbo` Whisper and `silero-v6.2.0` VAD GGML model files for embedded [Scribble](https://github.com/itsmontoya/scribble).
 - `streamlink` and `chat_downloader` for live Twitch sessions.
-- `curl` for OpenAI and platform HTTP APIs.
+- `curl` for hosted model and platform HTTP APIs.
 - `aws` CLI when `[staging].provider = "s3"`.
-- `OPENAI_API_KEY` for non-deterministic analysis.
+- `OPENAI_API_KEY` or `GEMINI_API_KEY`, depending on `[models].provider`.
 
-GPT-5.6 Sol supports image input and structured output but not audio/video input, so the program sends ordered image samples and local transcripts through the Responses API. Candidate audio uses the Chat Completions audio-input format documented for `gpt-audio-1.5`.
+The OpenAI provider sends ordered image samples and local transcripts through the Responses API, then uses `gpt-audio-1.5` only for matured-candidate audio. The Gemini provider uses Generate Content structured outputs for both editorial image analysis and candidate audio analysis. Both implement the same provider-neutral traits, so capture, candidate maturation, rendering, persistence, and publishing are unchanged.
 
 Download Scribble's configured local models once:
 
@@ -53,10 +53,13 @@ curl --fail --location --output models/ggml-silero-v6.2.0.bin \
 ```bash
 cargo build --release
 ./target/release/clipfarmer init
+cp .env.example .env
 # Edit clipfarmer.toml, place both local models under ./models, install local tools,
-# and set OPENAI_API_KEY.
+# and add the API key selected by [models].provider to .env.
 ./target/release/clipfarmer run --channel CHANNEL_LOGIN
 ```
+
+For every command except `init`, ClipFarmer loads `.env` from the directory containing the selected `clipfarmer.toml`. Values already present in the process environment take precedence, and malformed `.env` files stop startup with an error instead of being silently ignored. The `.env` file is Git-ignored; `.env.example` lists the supported secret names.
 
 On Apple Silicon, build with `cargo build --release --features metal`. The `coreml`, `cuda`, and `vulkan` features expose Scribble's other acceleration backends. Scribble is embedded as a library: the Whisper model loads once when the service starts and is reused across transcription windows; no `whisper-cli` executable is installed or spawned.
 
@@ -81,11 +84,20 @@ clipfarmer outcomes import metrics.jsonl
 
 ## Configuration
 
-See [`clipfarmer.toml.example`](clipfarmer.toml.example). Model identifiers are validated so a stale configuration cannot silently replace the intended architecture:
+See [`clipfarmer.toml.example`](clipfarmer.toml.example). Select the hosted model implementation with:
 
-- Observer: `gpt-5.6-terra`
-- Director/editor/critic: `gpt-5.6-sol`
-- Candidate audio: `gpt-audio-1.5`
+```toml
+[models]
+provider = "openai" # or "gemini"
+```
+
+Provider implementations are isolated in `src/models/openai.rs` and `src/models/gemini.rs`. The defaults are:
+
+- OpenAI observer: `gpt-5.6-terra`
+- OpenAI director/editor/critic: `gpt-5.6-sol`
+- OpenAI candidate audio: `gpt-audio-1.5`
+- Gemini observer and candidate audio: `gemini-3.8-flash`
+- Gemini director/editor/critic: `gemini-3.1-pro-preview`
 - Continuous transcription: embedded Scribble with a resident local Whisper model and local VAD, never a hosted transcription endpoint
 
 `publishers.dry_run = true` is the safe default. It creates deterministic remote IDs and exercises job recovery without network publication. Set it to `false` only after configuring the individual OAuth tokens.

@@ -5,7 +5,7 @@ use crate::{
         LocalObjectStore, ObjectStore, Publisher, S3CommandStore, ScribbleTranscriber,
         TwitchCapture, TwitchChatCapture, TwitchVodSource,
     },
-    config::{Config, ModelProvider},
+    config::{Config, ModelProvider, ScribbleModel},
     editorial::{
         CandidateAudioAnalyzer, DeterministicAudioAnnotation, DeterministicEditorial,
         EditorialModel,
@@ -76,7 +76,8 @@ pub struct RunResult {
 
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
-    pub transcription: PathBuf,
+    pub large_turbo_transcription: PathBuf,
+    pub tiny_transcription: PathBuf,
     pub voice_activity_detection: PathBuf,
 }
 
@@ -131,7 +132,10 @@ impl LibraryRunner {
         progress: impl Fn(JobProgress) + Send + Sync + 'static,
     ) -> Result<Self> {
         config.data_dir = data_dir;
-        config.scribble.model_path = model_paths.transcription;
+        config.scribble.model_path = match config.scribble.model_variant {
+            ScribbleModel::LargeTurbo => model_paths.large_turbo_transcription,
+            ScribbleModel::Tiny => model_paths.tiny_transcription,
+        };
         config.scribble.vad_model_path = model_paths.voice_activity_detection;
         config.validate()?;
         fs::create_dir_all(config.data_dir.join("outputs"))?;

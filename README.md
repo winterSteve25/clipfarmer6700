@@ -19,9 +19,11 @@ polled with `get_clipping_job` so UI state can recover after a reload.
 
 Configuration is supplied by the frontend for each start command. Passing an
 empty `config` object uses the defaults formerly documented in the example
-TOML. Job data directories and model paths are backend-controlled: every job
-receives an isolated directory under app data, while the large-turbo and tiny
-Whisper models plus the Silero VAD model are loaded from bundled resources.
+TOML. The frontend can select the bundled `large_turbo` or `tiny` Scribble
+transcription model with `scribble.modelVariant`. Job data directories and
+model paths remain backend-controlled: every job receives an isolated directory
+under app data, while both Whisper models and the Silero VAD model are loaded
+from bundled resources.
 
 ## Start the app
 `npm run tauri dev`

@@ -282,10 +282,15 @@ fn bundled_model_paths(app: &AppHandle) -> Result<ModelPaths, Box<dyn std::error
             .resolve(PathBuf::from(MODEL_DIR).join(name), BaseDirectory::Resource)
     };
     let paths = ModelPaths {
-        transcription: resolve("ggml-large-v3-turbo-q5_0.bin")?,
+        large_turbo_transcription: resolve("ggml-large-v3-turbo-q5_0.bin")?,
+        tiny_transcription: resolve("ggml-tiny-q5_1.bin")?,
         voice_activity_detection: resolve("ggml-silero-v6.2.0.bin")?,
     };
-    for path in [&paths.transcription, &paths.voice_activity_detection] {
+    for path in [
+        &paths.large_turbo_transcription,
+        &paths.tiny_transcription,
+        &paths.voice_activity_detection,
+    ] {
         if !path.is_file() {
             return Err(format!(
                 "bundled ClipFarmer model is missing at {}; check src-tauri/resources/scribble-models",

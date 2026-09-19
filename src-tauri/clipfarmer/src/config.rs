@@ -146,6 +146,8 @@ impl Default for MediaConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ScribbleConfig {
+    #[serde(default)]
+    pub model_variant: ScribbleModel,
     #[serde(default = "default_scribble_model")]
     pub model_path: PathBuf,
     #[serde(default = "default_scribble_vad_model")]
@@ -156,6 +158,14 @@ pub struct ScribbleConfig {
     pub language: String,
     #[serde(default = "default_scribble_window")]
     pub incremental_min_window_seconds: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScribbleModel {
+    #[default]
+    LargeTurbo,
+    Tiny,
 }
 
 fn default_scribble_model() -> PathBuf {
@@ -177,6 +187,7 @@ fn default_scribble_window() -> usize {
 impl Default for ScribbleConfig {
     fn default() -> Self {
         Self {
+            model_variant: ScribbleModel::default(),
             model_path: default_scribble_model(),
             vad_model_path: default_scribble_vad_model(),
             enable_vad: default_scribble_vad(),
@@ -494,6 +505,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.worker.poll_seconds, 10);
         assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert_eq!(config.scribble.model_variant, ScribbleModel::LargeTurbo);
         assert!(config.publishers.dry_run);
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
@@ -510,6 +522,7 @@ mod tests {
         let config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(config.worker.poll_seconds, 10);
         assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert_eq!(config.scribble.model_variant, ScribbleModel::LargeTurbo);
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
     }

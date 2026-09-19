@@ -1,9 +1,5 @@
 # ClipFarmer 6700
 
-ClipFarmer is an always-on Twitch monitor that turns synchronized stream evidence into edited vertical clips. Local Whisper supplies the complete transcript; GPT-5.6 Terra watches overlapping windows; GPT-5.6 Sol independently directs, edits, and critiques each matured candidate; GPT Audio 1.5 is used only for candidate tone and nonverbal events. A clip is never accepted by a chat spike or audio heuristic alone.
-
-Accepted moments render as clean 1080×1920 H.264/AAC MP4 files. YouTube and Instagram adapters publish immediately when production credentials are configured. TikTok deliberately uploads to the creator inbox as a draft for manual completion.
-
 ## Runtime flow
 
 ```text

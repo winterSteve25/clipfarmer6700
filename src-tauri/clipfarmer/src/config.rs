@@ -266,13 +266,13 @@ fn default_gemini_api_key_env() -> String {
     "GEMINI_API_KEY".to_owned()
 }
 fn default_gemini_observer_model() -> String {
-    "gemini-3.8-flash".to_owned()
+    "gemini-3.7-flash".to_owned()
 }
 fn default_gemini_editorial_model() -> String {
-    "gemini-3.1-pro-preview".to_owned()
+    "gemini-3.7-flash".to_owned()
 }
 fn default_gemini_audio_model() -> String {
-    "gemini-3.8-flash".to_owned()
+    "gemini-3.7-flash".to_owned()
 }
 
 impl Default for GeminiConfig {
@@ -453,8 +453,10 @@ impl Config {
                     &self.gemini.audio_model,
                 ];
                 ensure!(
-                    models.iter().all(|model| valid_gemini_model(model)),
-                    "Gemini model identifiers must start with gemini- and contain only letters, numbers, dots, underscores, or hyphens"
+                    models
+                        .iter()
+                        .all(|model| model.as_str() == "gemini-3.7-flash"),
+                    "Gemini observer, director, editor, critic, and audio models must use gemini-3.7-flash"
                 );
             }
         }
@@ -464,13 +466,6 @@ impl Config {
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("clipfarmer.sqlite3")
     }
-}
-
-fn valid_gemini_model(model: &str) -> bool {
-    model.starts_with("gemini-")
-        && model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 #[cfg(test)]
@@ -487,10 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn gemini_model_names_cannot_modify_the_request_url() {
+    fn gemini_requires_3_7_flash_for_every_role() {
         let mut config = Config::default();
         config.models.provider = ModelProvider::Gemini;
-        config.gemini.observer_model = "gemini-3.8-flash?key=leak".to_owned();
+        config.gemini.observer_model = "gemini-3.8-flash".to_owned();
         assert!(config.validate().is_err());
     }
 

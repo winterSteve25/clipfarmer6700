@@ -1,0 +1,66 @@
+# Runtime configuration for the embedded ClipFarmer library. Model paths are
+# resolved relative to this file. Set CLIPFARMER_CONFIG to use another config.
+data_dir = "./data"
+
+[worker]
+poll_seconds = 10
+max_attempts = 4
+ring_minutes = 10
+observer_window_seconds = 12
+observer_step_seconds = 6
+maturation_delay_seconds = 20
+queue_capacity = 256
+
+[media]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+streamlink_path = "streamlink"
+chat_downloader_path = "chat_downloader"
+frame_interval_seconds = 1
+
+[scribble]
+# These names document the bundled assets. The Tauri backend resolves and
+# injects their BaseDirectory::Resource paths at runtime.
+model_path = "models/ggml-large-v3-turbo-q5_0.bin"
+vad_model_path = "models/ggml-silero-v6.2.0.bin"
+enable_vad = true
+language = "auto"
+incremental_min_window_seconds = 30
+
+[models]
+provider = "gemini"
+
+[openai]
+api_key_env = "OPENAI_API_KEY"
+observer_model = "gpt-5.6-terra"
+director_model = "gpt-5.6-sol"
+editor_model = "gpt-5.6-sol"
+critic_model = "gpt-5.6-sol"
+audio_model = "gpt-audio-1.5"
+
+[gemini]
+api_key_env = "GEMINI_API_KEY"
+observer_model = "gemini-3.8-flash"
+director_model = "gemini-3.1-pro-preview"
+editor_model = "gemini-3.1-pro-preview"
+critic_model = "gemini-3.1-pro-preview"
+audio_model = "gemini-3.8-flash"
+
+[staging]
+provider = "local"
+bucket = "clipfarmer-artifacts"
+prefix = "staged"
+endpoint_env = "S3_ENDPOINT"
+
+[publishers]
+dry_run = true
+youtube = true
+instagram = false
+tiktok_drafts = false
+twitch_clips = false
+youtube_token_env = "YOUTUBE_ACCESS_TOKEN"
+instagram_token_env = "INSTAGRAM_ACCESS_TOKEN"
+instagram_account_env = "INSTAGRAM_ACCOUNT_ID"
+tiktok_token_env = "TIKTOK_ACCESS_TOKEN"
+twitch_token_env = "TWITCH_ACCESS_TOKEN"
+twitch_client_id_env = "TWITCH_CLIENT_ID"

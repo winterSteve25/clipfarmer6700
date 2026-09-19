@@ -276,12 +276,13 @@ impl Service {
         )
         .await?;
 
-        let recovery_step = Step::start("Checking for unfinished publish jobs");
         let recovery = self.retry_pending(input_path).await?;
-        recovery_step.done(format!(
-            "{} recovered posts, {} failures",
-            recovery.posts_completed, recovery.publish_failures
-        ));
+        if recovery.posts_completed > 0 || recovery.publish_failures > 0 {
+            progress::success(format!(
+                "Publish recovery finished: {} posts, {} failures",
+                recovery.posts_completed, recovery.publish_failures
+            ));
+        }
         summary.posts_completed += recovery.posts_completed;
         summary.publish_failures += recovery.publish_failures;
 

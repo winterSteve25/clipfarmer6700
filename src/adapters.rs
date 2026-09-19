@@ -2,7 +2,7 @@
 use crate::{
     domain::{Candidate, EditManifest, LocalSignals, Outcome, TranscriptSegment, VisualSample},
     manifest::{render_srt, validate_manifest, validate_object_key, validate_safe_path},
-    progress::{self, Step},
+    progress::{self, ByteProgress, Step},
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -671,22 +671,26 @@ impl TwitchVodSource {
         fs::write(&channel_path, format!("{channel_login}\n"))?;
 
         let media_path = cache_dir.join("source.ts");
-        let media_step = Step::start("Downloading Twitch VOD (this can take a while)");
         if fs::metadata(&media_path).is_ok_and(|metadata| metadata.len() > 0) {
-            media_step.skipped(format!("using cached {}", media_path.display()));
+            let size = fs::metadata(&media_path)?.len();
+            progress::info(format!(
+                "Using cached VOD {} ({})",
+                media_path.display(),
+                progress::bytes(size)
+            ));
         } else {
             self.download_media(&canonical_url, &media_path).await?;
-            let bytes = fs::metadata(&media_path)?.len();
-            media_step.done(format!("{} ({})", media_path.display(), human_bytes(bytes)));
         }
         let chat_path = media_path.with_extension("chat.jsonl");
-        let chat_step = Step::start("Downloading timestamped Twitch chat");
         if chat_path.exists() {
-            chat_step.skipped(format!("using cached {}", chat_path.display()));
+            let size = fs::metadata(&chat_path)?.len();
+            progress::info(format!(
+                "Using cached chat {} ({})",
+                chat_path.display(),
+                progress::bytes(size)
+            ));
         } else {
             self.download_chat(&canonical_url, &chat_path).await?;
-            let bytes = fs::metadata(&chat_path)?.len();
-            chat_step.done(format!("{} ({})", chat_path.display(), human_bytes(bytes)));
         }
         Ok(PreparedTwitchVod {
             id,
@@ -715,6 +719,7 @@ impl TwitchVodSource {
     async fn download_media(&self, url: &str, destination: &Path) -> Result<()> {
         let temporary =
             destination.with_file_name(format!("source-{}.part.ts", uuid::Uuid::new_v4()));
+        let download = ByteProgress::start("Downloading Twitch VOD", &temporary);
         let output = tokio::process::Command::new(&self.streamlink)
             .args(["--force", "--progress", "no", "--output"])
             .arg(&temporary)
@@ -726,6 +731,7 @@ impl TwitchVodSource {
             .await
             .context("download Twitch VOD with streamlink")?;
         if !output.status.success() {
+            download.failed(format!("streamlink exited with {}", output.status));
             let _ = fs::remove_file(&temporary);
             anyhow::bail!(
                 "streamlink could not download Twitch VOD: {}",
@@ -736,13 +742,16 @@ impl TwitchVodSource {
             fs::metadata(&temporary).is_ok_and(|metadata| metadata.len() > 0),
             "streamlink produced an empty Twitch VOD"
         );
+        let transferred = fs::metadata(&temporary)?.len();
         fs::rename(&temporary, destination)?;
+        download.done_with_size(transferred, destination.display().to_string());
         Ok(())
     }
 
     async fn download_chat(&self, url: &str, destination: &Path) -> Result<()> {
         let temporary =
             destination.with_file_name(format!("chat-{}.part.jsonl", uuid::Uuid::new_v4()));
+        let download = ByteProgress::start("Downloading timestamped Twitch chat", &temporary);
         let output = tokio::process::Command::new(&self.chat_downloader)
             .arg(url)
             .args(["--output"])
@@ -754,6 +763,7 @@ impl TwitchVodSource {
             .await
             .context("download Twitch VOD chat")?;
         if !output.status.success() {
+            download.failed(format!("chat_downloader exited with {}", output.status));
             let _ = fs::remove_file(&temporary);
             anyhow::bail!(
                 "chat_downloader could not download Twitch VOD chat: {}",
@@ -761,27 +771,14 @@ impl TwitchVodSource {
             );
         }
         if temporary.exists() {
+            let transferred = fs::metadata(&temporary)?.len();
             fs::rename(&temporary, destination)?;
+            download.done_with_size(transferred, destination.display().to_string());
         } else {
             fs::write(destination, [])?;
+            download.done_with_size(0, "no chat messages");
         }
         Ok(())
-    }
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1_024.0;
-    const MIB: f64 = KIB * 1_024.0;
-    const GIB: f64 = MIB * 1_024.0;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes / KIB)
-    } else {
-        format!("{bytes:.0} B")
     }
 }
 

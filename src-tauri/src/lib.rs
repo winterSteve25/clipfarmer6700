@@ -4,6 +4,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load development secrets for the Rust backend. Existing environment
+    // variables take precedence over values from `.env`.
+    let _ = dotenvy::dotenv();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {

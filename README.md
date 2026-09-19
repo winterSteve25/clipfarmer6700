@@ -69,6 +69,14 @@ Replay a VOD through the identical editorial path:
 ./target/release/clipfarmer replay --channel CHANNEL_LOGIN --input /absolute/path/vod.mp4
 ```
 
+Or give ClipFarmer a public Twitch VOD URL directly. Streamlink resolves the VOD and channel, while `chat_downloader` saves its timestamped chat. Both are cached under `data/vods/<VOD_ID>/` before the normal replay begins:
+
+```bash
+./target/release/clipfarmer replay --vod https://www.twitch.tv/videos/VOD_ID
+```
+
+`--input` and `--vod` are mutually exclusive. A local input still requires `--channel`; Twitch VOD replay derives it automatically, and an optional `--channel` value is treated as a consistency check. `--duration-ms` limits analysis but does not currently shorten the initial VOD download.
+
 For an offline plumbing test, `--deterministic-models` replaces only the hosted editorial/audio calls. Embedded Scribble transcription, frame extraction, rendering, persistence, staging, and dry-run publishing still execute normally.
 
 Other commands:

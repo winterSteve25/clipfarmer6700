@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod manifest;
 pub mod models;
 pub mod pipeline;
+pub mod progress;
 pub mod publishers;
 pub mod store;
 pub mod timeline;

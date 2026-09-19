@@ -17,6 +17,7 @@ use clipfarmer6700::{
         gemini::{GeminiAudioAnalyzer, GeminiEditorial},
         openai::{OpenAiAudioAnalyzer, OpenAiEditorial},
     },
+    progress::{self, Step},
     publishers::{InstagramPublisher, TikTokDraftPublisher, TwitchClipPublisher, YouTubePublisher},
     store::Store,
 };
@@ -107,8 +108,15 @@ async fn main() -> Result<()> {
         println!("wrote {}", cli.config.display());
         return Ok(());
     }
+
+    progress::section("Starting ClipFarmer");
+    let config_step = Step::start(format!(
+        "Loading configuration from {}",
+        cli.config.display()
+    ));
     load_dotenv(&cli.config)?;
     let cfg = Config::load(&cli.config)?;
+    config_step.done(format!("data directory {}", cfg.data_dir.display()));
     match cli.command {
         Command::Run {
             channel,
@@ -123,6 +131,7 @@ async fn main() -> Result<()> {
         } => {
             let (channel, input) = match vod {
                 Some(url) => {
+                    progress::section("Preparing Twitch VOD");
                     let prepared = TwitchVodSource {
                         streamlink: cfg.media.streamlink_path.clone(),
                         chat_downloader: cfg.media.chat_downloader_path.clone(),
@@ -130,12 +139,12 @@ async fn main() -> Result<()> {
                     }
                     .prepare(&url, channel.as_deref())
                     .await?;
-                    eprintln!(
-                        "using cached Twitch VOD {} from channel {} at {}",
+                    progress::success(format!(
+                        "VOD {} from {} is ready at {}",
                         prepared.id,
                         prepared.channel_login,
                         prepared.media_path.display()
-                    );
+                    ));
                     (
                         prepared.channel_login,
                         prepared.media_path.to_string_lossy().into_owned(),
@@ -147,8 +156,19 @@ async fn main() -> Result<()> {
                 ),
             };
             let duration = match duration_ms {
-                Some(value) => value,
-                None => probe_duration_ms(&cfg, &input).await?,
+                Some(value) => {
+                    progress::info(format!(
+                        "Analysis limited to {}",
+                        progress::timestamp(value)
+                    ));
+                    value
+                }
+                None => {
+                    let duration_step = Step::start("Reading media duration");
+                    let value = probe_duration_ms(&cfg, &input).await?;
+                    duration_step.done(progress::timestamp(value));
+                    value
+                }
             };
             let service = build_service(cfg, deterministic_models)?;
             let summary = service.replay_file(&channel, &input, duration).await?;
@@ -167,8 +187,11 @@ async fn main() -> Result<()> {
         }
         Command::Auth { platform } => auth_status(&cfg, platform),
         Command::Status => {
+            let status_step = Step::start("Reading pipeline status");
             let store = Store::open(cfg.db_path())?;
-            for (state, count) in store.status_counts()? {
+            let counts = store.status_counts()?;
+            status_step.done(format!("{} states", counts.len()));
+            for (state, count) in counts {
                 println!("{state}: {count}");
             }
             Ok(())
@@ -176,6 +199,7 @@ async fn main() -> Result<()> {
         Command::Profile {
             command: ProfileCommand::Rebuild { channel, from },
         } => {
+            let rebuild_step = Step::start(format!("Rebuilding profile for {channel}"));
             let store = Store::open(cfg.db_path())?;
             let mut profile = match from {
                 Some(path) => serde_json::from_slice::<ChannelProfile>(&fs::read(path)?)?,
@@ -186,12 +210,14 @@ async fn main() -> Result<()> {
             profile.channel_id = channel;
             profile.version = profile.version.saturating_add(1);
             store.upsert_profile(&profile)?;
+            rebuild_step.done(format!("version {}", profile.version));
             println!("stored channel profile version {}", profile.version);
             Ok(())
         }
         Command::Outcomes {
             command: OutcomesCommand::Import { file },
         } => {
+            let import_step = Step::start(format!("Importing outcomes from {}", file.display()));
             let store = Store::open(cfg.db_path())?;
             let raw = fs::read_to_string(file)?;
             let mut imported = 0;
@@ -200,6 +226,7 @@ async fn main() -> Result<()> {
                 store.record_metrics(&metrics)?;
                 imported += 1;
             }
+            import_step.done(format!("{imported} snapshots"));
             println!("imported {imported} outcome snapshots");
             Ok(())
         }
@@ -221,6 +248,11 @@ fn load_dotenv(config_path: &Path) -> Result<()> {
 }
 
 fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
+    progress::section("Initializing pipeline");
+    let transcription_step = Step::start(format!(
+        "Loading transcription model {}",
+        cfg.scribble.model_path.display()
+    ));
     let transcriber = Arc::new(ScribbleTranscriber::new(
         cfg.media.ffmpeg_path.clone(),
         &cfg.scribble.model_path,
@@ -230,8 +262,18 @@ fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
         cfg.scribble.enable_vad,
         cfg.scribble.incremental_min_window_seconds,
     )?);
+    transcription_step.done(if cfg.scribble.enable_vad {
+        "model and VAD ready"
+    } else {
+        "model ready; VAD disabled"
+    });
     let visual_sampler = Arc::new(FfmpegVisualSampler {
         executable: cfg.media.ffmpeg_path.clone(),
+    });
+    let models_step = Step::start(if deterministic_models {
+        "Selecting deterministic editorial models".to_owned()
+    } else {
+        format!("Configuring {:?} editorial models", cfg.models.provider)
     });
     let (editorial, audio_analyzer): (Arc<dyn EditorialModel>, Arc<dyn CandidateAudioAnalyzer>) =
         if deterministic_models {
@@ -279,6 +321,16 @@ fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
                 }
             }
         };
+    models_step.done(if deterministic_models {
+        "offline decisions enabled".to_owned()
+    } else {
+        format!("{:?} provider ready", cfg.models.provider)
+    });
+
+    let staging_step = Step::start(format!(
+        "Configuring {} object staging",
+        cfg.staging.provider
+    ));
     let object_store: Arc<dyn ObjectStore> = match cfg.staging.provider.as_str() {
         "local" => Arc::new(LocalObjectStore {
             root: cfg.data_dir.join("staging"),
@@ -296,8 +348,22 @@ fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
         }),
         provider => anyhow::bail!("unsupported staging provider {provider}"),
     };
+    staging_step.done(format!("bucket {}", cfg.staging.bucket));
+
+    let publisher_step = Step::start("Configuring publishers");
     let publishers = build_publishers(&cfg)?;
-    Service::new(
+    publisher_step.done(format!(
+        "{} enabled{}",
+        publishers.len(),
+        if cfg.publishers.dry_run {
+            " (dry run)"
+        } else {
+            ""
+        }
+    ));
+
+    let service_step = Step::start("Opening pipeline database");
+    let service = Service::new(
         cfg.clone(),
         ServiceDependencies {
             transcriber,
@@ -313,7 +379,9 @@ fn build_service(cfg: Config, deterministic_models: bool) -> Result<Service> {
             object_store,
             publishers,
         },
-    )
+    )?;
+    service_step.done(cfg.db_path().display().to_string());
+    Ok(service)
 }
 
 fn build_publishers(cfg: &Config) -> Result<Vec<Arc<dyn Publisher>>> {
@@ -380,6 +448,7 @@ async fn run_live(cfg: Config, channel: &str, deterministic_models: bool) -> Res
                 .all(|character| character.is_ascii_alphanumeric() || character == '_'),
         "invalid Twitch channel login"
     );
+    progress::section(format!("Starting live capture for {channel}"));
     let capture_path = cfg
         .data_dir
         .join("live")
@@ -388,18 +457,27 @@ async fn run_live(cfg: Config, channel: &str, deterministic_models: bool) -> Res
     let capture = TwitchCapture {
         streamlink: cfg.media.streamlink_path.clone(),
     };
+    let video_step = Step::start("Starting Twitch video capture");
     let mut child = capture.start(channel, &capture_path).await?;
+    video_step.done(capture_path.display().to_string());
     let chat_path = capture_path.with_extension("chat.jsonl");
+    let chat_step = Step::start("Starting Twitch chat capture");
     let mut chat_child = TwitchChatCapture {
         executable: cfg.media.chat_downloader_path.clone(),
     }
     .start(channel, &chat_path)?;
+    chat_step.done(chat_path.display().to_string());
     let service = build_service(cfg.clone(), deterministic_models)?;
+    progress::success(format!(
+        "Live capture is running; checking every {} seconds (Ctrl-C to stop)",
+        cfg.worker.poll_seconds.max(5)
+    ));
     let mut analyzed_through = 0_i64;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
                 result?;
+                progress::info("Stopping live capture…");
                 child.kill().await.ok();
                 chat_child.kill().await.ok();
                 break;
@@ -407,40 +485,65 @@ async fn run_live(cfg: Config, channel: &str, deterministic_models: bool) -> Res
             _ = tokio::time::sleep(Duration::from_secs(cfg.worker.poll_seconds.max(5))) => {
                 if let Some(status) = child.try_wait()? {
                     ensure!(status.success(), "streamlink exited with {status}");
+                    progress::info(format!("Twitch capture ended with {status}"));
                     chat_child.kill().await.ok();
                     break;
                 }
                 let Some(path) = capture_path.to_str() else { anyhow::bail!("capture path is not UTF-8") };
-                let Ok(duration) = probe_duration_ms(&cfg, path).await else { continue };
+                let duration = match probe_duration_ms(&cfg, path).await {
+                    Ok(duration) => duration,
+                    Err(error) => {
+                        progress::warning(format!("Capture is not ready to analyze yet: {error}"));
+                        continue;
+                    }
+                };
                 let minimum_advance = cfg.worker.observer_step_seconds as i64 * 1_000;
                 if duration >= analyzed_through + minimum_advance {
                     let scan_start = analyzed_through.saturating_sub(120_000);
                     match service.scan_file(channel, path, duration, scan_start).await {
                         Ok(summary) => {
                             analyzed_through = duration;
-                            println!("observed={} accepted={} posts={}", summary.windows_observed, summary.candidates_accepted, summary.posts_completed);
+                            progress::success(format!("Live pass complete: observed={}, accepted={}, posts={}", summary.windows_observed, summary.candidates_accepted, summary.posts_completed));
                         }
-                        Err(error) => eprintln!("analysis pass failed and will retry: {error:#}"),
+                        Err(error) => progress::warning(format!("Analysis pass failed and will retry: {error:#}")),
                     }
+                } else {
+                    progress::info(format!(
+                        "Captured {} so far; waiting for {} more",
+                        progress::timestamp(duration),
+                        progress::timestamp(analyzed_through + minimum_advance - duration)
+                    ));
                 }
             }
         }
     }
     if capture_path.exists() {
+        progress::section("Running final live analysis pass");
         let path = capture_path.to_string_lossy();
-        if let Ok(duration) = probe_duration_ms(&cfg, &path).await
-            && duration > analyzed_through
-        {
-            let _ = service
-                .scan_file(
-                    channel,
-                    &path,
-                    duration,
-                    analyzed_through.saturating_sub(120_000),
-                )
-                .await;
+        let duration_step = Step::start("Reading final capture duration");
+        match probe_duration_ms(&cfg, &path).await {
+            Ok(duration) => {
+                duration_step.done(progress::timestamp(duration));
+                if duration > analyzed_through {
+                    if let Err(error) = service
+                        .scan_file(
+                            channel,
+                            &path,
+                            duration,
+                            analyzed_through.saturating_sub(120_000),
+                        )
+                        .await
+                    {
+                        progress::warning(format!("Final analysis pass failed: {error:#}"));
+                    }
+                } else {
+                    progress::info("No unanalyzed media remains");
+                }
+            }
+            Err(error) => duration_step.failed(format!("could not probe capture: {error:#}")),
         }
     }
+    progress::success("Live capture stopped cleanly");
     Ok(())
 }
 

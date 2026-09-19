@@ -8,6 +8,7 @@ use crate::{
     editorial::{CandidateAudioAnalyzer, EditorialModel, ReviewResult},
     evidence::EvidenceRing,
     manifest::build_manifest,
+    progress::{self, Step},
     store::Store,
     timeline::{CandidateTracker, TranscriptDeduper},
 };
@@ -98,7 +99,16 @@ impl Service {
     ) -> Result<RunSummary> {
         ensure!(duration_ms >= 5_000, "input is too short to contain a clip");
         ensure!(Path::new(input_path).exists(), "input media does not exist");
+
+        progress::section(format!("Analyzing {channel_id}"));
+        progress::info(format!(
+            "Source: {input_path} • duration {} • starting at {}",
+            progress::timestamp(duration_ms),
+            progress::timestamp(scan_start_ms)
+        ));
+
         let session_id = uuid::Uuid::new_v4().to_string();
+        let session_step = Step::start("Creating analysis session");
         self.store
             .create_session(&session_id, channel_id, input_path)?;
         let source_id = stable_source_id(input_path)?;
@@ -106,34 +116,56 @@ impl Service {
             .store
             .profile(channel_id)?
             .unwrap_or_else(|| ChannelProfile::empty(channel_id));
+        session_step.done(format!("session {}", short_id(&session_id)));
         let step_ms = self.cfg.worker.observer_step_seconds as i64 * 1_000;
         let window_ms = self.cfg.worker.observer_window_seconds as i64 * 1_000;
         let mut cursor = (scan_start_ms.max(0) + step_ms).min(duration_ms);
         let mut tracker = CandidateTracker::new(self.cfg.worker.maturation_delay_seconds);
         let mut transcripts = TranscriptDeduper::default();
         let mut visuals = Vec::new();
+        let chat_step = Step::start("Loading timestamped chat");
         let chat = load_chat_sidecar(input_path, &session_id)?;
+        chat_step.done(format!("{} messages", chat.len()));
         let mut summary = RunSummary::default();
         let mut audio_energy_total = 0.0;
+        let total_windows = ((duration_ms - cursor + step_ms - 1) / step_ms + 1).max(1);
+        let mut window_number = 0_i64;
 
         while cursor <= duration_ms {
+            window_number += 1;
             let window_start = cursor.saturating_sub(window_ms);
             let window_end = cursor;
-            for segment in self
+            progress::section(format!(
+                "Window {window_number}/{total_windows} • {} → {}",
+                progress::timestamp(window_start),
+                progress::timestamp(window_end)
+            ));
+
+            let transcription_step = Step::start("Transcribing audio");
+            let segments = self
                 .transcriber
                 .transcribe(input_path, &session_id, window_start, window_end)
-                .await?
-            {
+                .await?;
+            let segment_count = segments.len();
+            let mut new_segment_count = 0;
+            for segment in segments {
                 if transcripts.insert(segment.clone()) {
                     self.store.record_transcript(&segment)?;
+                    new_segment_count += 1;
                 }
             }
+            transcription_step.done(format!(
+                "{new_segment_count} new / {segment_count} found, {} total",
+                transcripts.segments().len()
+            ));
+
             let frame_dir = self
                 .cfg
                 .data_dir
                 .join("frames")
                 .join(&session_id)
                 .join(format!("{window_start}-{window_end}"));
+            let visuals_step = Step::start("Sampling video frames");
             let new_visuals = self
                 .visual_sampler
                 .sample(
@@ -144,11 +176,18 @@ impl Service {
                     self.cfg.media.frame_interval_seconds,
                 )
                 .await?;
+            visuals_step.done(format!("{} frames", new_visuals.len()));
             visuals.extend(new_visuals);
+
+            let signals_step = Step::start("Measuring audio and scene changes");
             let local_signals = self
                 .signal_extractor
                 .extract(input_path, window_start, window_end)
                 .await?;
+            signals_step.done(format!(
+                "energy {:.2}, scene changes {:.2}/s",
+                local_signals.audio_energy, local_signals.scene_change_rate
+            ));
             audio_energy_total += local_signals.audio_energy;
             let window = evidence_window(
                 &session_id,
@@ -163,10 +202,23 @@ impl Service {
                     local_signals: Some(local_signals),
                 },
             );
+            let observer_step = Step::start(format!(
+                "Running observer ({})",
+                self.editorial.model_name(EditorialStage::Observer)
+            ));
             let observer = self
                 .editorial
                 .decide(EditorialStage::Observer, &window, None, &[], None)
                 .await?;
+            observer_step.done(format!(
+                "{} at {:.0}% confidence",
+                if observer.accept {
+                    "candidate detected"
+                } else {
+                    "no candidate"
+                },
+                observer.confidence * 100.0
+            ));
             summary.windows_observed += 1;
             self.record_ring("observer", &session_id, serde_json::to_value(&observer)?)?;
             if observer.accept
@@ -179,6 +231,12 @@ impl Service {
                     duration_ms,
                 )
             {
+                progress::info(format!(
+                    "Tracking candidate {} ({} → {})",
+                    short_id(&candidate.id),
+                    progress::timestamp(candidate.start_ms),
+                    progress::timestamp(candidate.end_ms)
+                ));
                 tracker.observe(candidate);
             }
             let ready = tracker.mature(cursor);
@@ -201,6 +259,7 @@ impl Service {
             cursor = (cursor + step_ms).min(duration_ms);
         }
 
+        progress::section("Finalizing candidates");
         let ready =
             tracker.mature(duration_ms + self.cfg.worker.maturation_delay_seconds as i64 * 1_000);
         self.review_ready(
@@ -216,15 +275,31 @@ impl Service {
             &mut summary,
         )
         .await?;
+
+        let recovery_step = Step::start("Checking for unfinished publish jobs");
         let recovery = self.retry_pending(input_path).await?;
+        recovery_step.done(format!(
+            "{} recovered posts, {} failures",
+            recovery.posts_completed, recovery.publish_failures
+        ));
         summary.posts_completed += recovery.posts_completed;
         summary.publish_failures += recovery.publish_failures;
+
+        let profile_step = Step::start("Updating channel profile");
         update_profile_from_session(&mut profile, transcripts.segments(), &chat, duration_ms);
         if summary.windows_observed > 0 {
             profile.normal_audio_energy = audio_energy_total / summary.windows_observed as f64;
         }
         self.store.upsert_profile(&profile)?;
         self.store.finish_session(&session_id, "completed")?;
+        profile_step.done(format!("version {}", profile.version));
+        progress::success(format!(
+            "Analysis complete: {} windows, {} accepted, {} rejected, {} posts",
+            summary.windows_observed,
+            summary.candidates_accepted,
+            summary.candidates_rejected,
+            summary.posts_completed
+        ));
         Ok(summary)
     }
 
@@ -237,8 +312,18 @@ impl Service {
     ) -> Result<()> {
         for candidate in ready {
             if !self.store.upsert_candidate(&candidate)? {
+                progress::info(format!(
+                    "Candidate {} was already processed; skipping",
+                    short_id(&candidate.id)
+                ));
                 continue;
             }
+            progress::section(format!(
+                "Reviewing candidate {} • {} → {}",
+                short_id(&candidate.id),
+                progress::timestamp(candidate.start_ms),
+                progress::timestamp(candidate.end_ms)
+            ));
             summary.candidates_reviewed += 1;
             let evidence = evidence_window(
                 &candidate.session_id,
@@ -252,6 +337,10 @@ impl Service {
                 .await?;
             if review.accepted {
                 summary.candidates_accepted += 1;
+                progress::success(format!(
+                    "Candidate accepted: {}",
+                    review.final_decision.title
+                ));
                 match self
                     .render_and_publish(input_path, &review, context.transcripts)
                     .await
@@ -259,6 +348,10 @@ impl Service {
                     Ok(outcomes) => summary.posts_completed += outcomes.len(),
                     Err(error) => {
                         summary.publish_failures += 1;
+                        progress::warning(format!(
+                            "Publishing candidate {} failed and will be retried: {error:#}",
+                            short_id(&review.candidate.id)
+                        ));
                         self.record_ring(
                             "publish_retryable",
                             &review.candidate.session_id,
@@ -271,6 +364,10 @@ impl Service {
                 }
             } else {
                 summary.candidates_rejected += 1;
+                progress::info(format!(
+                    "Candidate rejected: {}",
+                    review.final_decision.rationale
+                ));
             }
         }
         Ok(())
@@ -279,18 +376,27 @@ impl Service {
     /// Retries only unfinished platform jobs. Completed remote posts are never submitted again.
     pub async fn retry_pending(&self, input_path: &str) -> Result<RunSummary> {
         let mut summary = RunSummary::default();
-        for candidate in self.store.pending_candidates(100)? {
+        let pending = self.store.pending_candidates(100)?;
+        if pending.is_empty() {
+            progress::info("No unfinished publish jobs");
+        } else {
+            progress::info(format!("Retrying {} unfinished candidates", pending.len()));
+        }
+        for candidate in pending {
+            progress::section(format!("Recovering candidate {}", short_id(&candidate.id)));
             let attempts = self.store.note_candidate_attempt(&candidate.id)?;
             if attempts > self.cfg.worker.max_attempts {
                 self.store
                     .fail_candidate(&candidate.id, "retry budget exhausted")?;
                 summary.publish_failures += 1;
+                progress::warning("Retry budget exhausted; candidate marked failed");
                 continue;
             }
             let Some(final_decision) = self.store.final_decision(&candidate.id)? else {
                 self.store
                     .fail_candidate(&candidate.id, "stored critic decision is missing")?;
                 summary.publish_failures += 1;
+                progress::warning("Stored critic decision is missing; candidate marked failed");
                 continue;
             };
             let transcripts = self.store.transcripts_for_candidate(&candidate)?;
@@ -312,7 +418,10 @@ impl Service {
                 .await
             {
                 Ok(outcomes) => summary.posts_completed += outcomes.len(),
-                Err(_) => summary.publish_failures += 1,
+                Err(error) => {
+                    summary.publish_failures += 1;
+                    progress::warning(format!("Recovery attempt failed: {error:#}"));
+                }
             }
         }
         Ok(summary)
@@ -329,13 +438,24 @@ impl Service {
             candidate.state == ClipState::Ready,
             "candidate is not ready"
         );
+
+        let audio_step = Step::start("Analyzing candidate audio");
         let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
+        audio_step.done(format!(
+            "{:.0}% confidence, {} detected events",
+            audio.confidence * 100.0,
+            audio.nonverbal_events.len()
+        ));
         let mut decisions = Vec::new();
         for stage in [
             EditorialStage::Director,
             EditorialStage::Editor,
             EditorialStage::Critic,
         ] {
+            let editorial_step = Step::start(format!(
+                "Running {stage} ({})",
+                self.editorial.model_name(stage)
+            ));
             let decision = self
                 .editorial
                 .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
@@ -346,6 +466,15 @@ impl Service {
                 self.editorial.model_name(stage),
                 &decision,
             )?;
+            editorial_step.done(format!(
+                "{} at {:.0}% confidence",
+                if decision.accept {
+                    "accepted"
+                } else {
+                    "rejected"
+                },
+                decision.confidence * 100.0
+            ));
             decisions.push(decision);
         }
         let final_decision = decisions.last().cloned().expect("three decisions");
@@ -376,11 +505,14 @@ impl Service {
     ) -> Result<Vec<Outcome>> {
         ensure!(review.accepted, "cannot render a rejected candidate");
         let candidate = &review.candidate;
+        progress::section(format!("Producing candidate {}", short_id(&candidate.id)));
         let output_path = self
             .cfg
             .data_dir
             .join("outputs")
             .join(format!("{}.mp4", candidate.id));
+
+        let manifest_step = Step::start("Building edit manifest and captions");
         let manifest = build_manifest(
             candidate,
             &review.final_decision,
@@ -389,16 +521,28 @@ impl Service {
             transcripts,
         )?;
         self.store.record_manifest(&manifest)?;
+        manifest_step.done(format!(
+            "{} captions, {} layout",
+            manifest.captions.len(),
+            manifest.layout
+        ));
+
+        let render_step = Step::start("Rendering vertical clip with ffmpeg");
         let rendered = self.renderer.render(&manifest).await?;
         let _ = self
             .store
             .transition(&candidate.id, ClipState::Accepted, ClipState::Rendered)?;
+        render_step.done(rendered.clone());
+
         let object_key = format!("{}/{}.mp4", candidate.channel_id, candidate.id);
+        let staging_step = Step::start("Staging rendered clip");
         let staged = self.object_store.stage(&rendered, &object_key).await?;
         let _ = self
             .store
             .transition(&candidate.id, ClipState::Rendered, ClipState::Staged)?;
+        staging_step.done(display_location(&staged));
 
+        let queue_step = Step::start("Creating idempotent publish jobs");
         for publisher in &self.publishers {
             let job_id = format!("{}-{}", publisher.platform(), candidate.id);
             let key = format!("{}:{}", publisher.platform(), candidate.idempotency_key());
@@ -408,6 +552,7 @@ impl Service {
         let _ = self
             .store
             .transition(&candidate.id, ClipState::Staged, ClipState::Publishing)?;
+        queue_step.done(format!("{} platforms", self.publishers.len()));
 
         let mut outcomes = Vec::new();
         let mut failures = Vec::new();
@@ -416,9 +561,14 @@ impl Service {
                 .store
                 .publish_job_done(&candidate.id, publisher.platform())?
             {
+                progress::info(format!(
+                    "{} was already published; skipping",
+                    publisher.platform()
+                ));
                 continue;
             }
             let key = format!("{}:{}", publisher.platform(), candidate.idempotency_key());
+            let publish_step = Step::start(format!("Publishing to {}", publisher.platform()));
             match publisher
                 .publish(
                     candidate,
@@ -431,6 +581,7 @@ impl Service {
             {
                 Ok(outcome) => {
                     self.store.complete_publish_job(&outcome)?;
+                    publish_step.done(format!("status {}", outcome.status));
                     outcomes.push(outcome);
                 }
                 Err(error) => {
@@ -439,6 +590,7 @@ impl Service {
                         publisher.platform(),
                         &error.to_string(),
                     )?;
+                    publish_step.failed(error.to_string());
                     failures.push(format!("{}: {error}", publisher.platform()));
                 }
             }
@@ -456,12 +608,29 @@ impl Service {
         if !failures.is_empty() {
             anyhow::bail!("one or more publishers failed: {}", failures.join("; "));
         }
+        progress::success(format!(
+            "Candidate {} finished with {} completed posts",
+            short_id(&candidate.id),
+            outcomes.len()
+        ));
         Ok(outcomes)
     }
 
     fn record_ring(&self, kind: &str, subject: &str, detail: serde_json::Value) -> Result<()> {
         self.evidence_ring.record(kind, subject, detail.clone());
         self.store.record_timeline(subject, 0, kind, &detail)
+    }
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn display_location(location: &str) -> String {
+    if location.starts_with("https://") {
+        "remote HTTPS object ready".to_owned()
+    } else {
+        location.to_owned()
     }
 }
 

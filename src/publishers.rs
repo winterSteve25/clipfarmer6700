@@ -6,7 +6,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct YouTubePublisher {
@@ -265,7 +266,39 @@ impl Publisher for TikTokDraftPublisher {
 pub struct TwitchClipPublisher {
     pub access_token: String,
     pub client_id: String,
-    pub broadcaster_id: String,
+    broadcaster_ids: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl TwitchClipPublisher {
+    pub fn new(access_token: String, client_id: String) -> Self {
+        Self {
+            access_token,
+            client_id,
+            broadcaster_ids: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn broadcaster_id(&self, login: &str) -> Result<String> {
+        ensure!(valid_twitch_login(login), "invalid Twitch channel login");
+        let normalized = login.to_ascii_lowercase();
+        if let Some(id) = self.broadcaster_ids.read().await.get(&normalized) {
+            return Ok(id.clone());
+        }
+        let response = curl_json(
+            "GET",
+            &format!("https://api.twitch.tv/helix/users?login={normalized}"),
+            &self.access_token,
+            &[("Client-Id", &self.client_id)],
+            None,
+        )
+        .await?;
+        let id = broadcaster_id_from_response(&response, &normalized)?.to_owned();
+        self.broadcaster_ids
+            .write()
+            .await
+            .insert(normalized, id.clone());
+        Ok(id)
+    }
 }
 
 #[async_trait]
@@ -283,17 +316,13 @@ impl Publisher for TwitchClipPublisher {
         idempotency_key: &str,
     ) -> Result<Outcome> {
         ensure!(
-            !self.access_token.is_empty()
-                && !self.client_id.is_empty()
-                && !self.broadcaster_id.is_empty(),
+            !self.access_token.is_empty() && !self.client_id.is_empty(),
             "Twitch clip credentials are not configured"
         );
+        let broadcaster_id = self.broadcaster_id(&candidate.channel_id).await?;
         let response = curl_json(
             "POST",
-            &format!(
-                "https://api.twitch.tv/helix/clips?broadcaster_id={}",
-                self.broadcaster_id
-            ),
+            &format!("https://api.twitch.tv/helix/clips?broadcaster_id={broadcaster_id}"),
             &self.access_token,
             &[("Client-Id", &self.client_id)],
             None,
@@ -312,6 +341,31 @@ impl Publisher for TwitchClipPublisher {
             url: Some(format!("https://clips.twitch.tv/{remote_id}")),
         })
     }
+}
+
+fn valid_twitch_login(login: &str) -> bool {
+    !login.is_empty()
+        && login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn broadcaster_id_from_response<'a>(response: &'a Value, expected_login: &str) -> Result<&'a str> {
+    let user = response
+        .pointer("/data/0")
+        .context("Twitch user lookup returned no matching channel")?;
+    let login = user
+        .get("login")
+        .and_then(Value::as_str)
+        .context("Twitch user lookup omitted login")?;
+    ensure!(
+        login.eq_ignore_ascii_case(expected_login),
+        "Twitch user lookup returned a different channel"
+    );
+    user.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        .context("Twitch user lookup omitted a valid broadcaster ID")
 }
 
 async fn curl_upload(
@@ -350,5 +404,29 @@ async fn curl_upload(
         Ok(serde_json::json!({}))
     } else {
         serde_json::from_slice(&output.stdout).context("upload response is not JSON")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_broadcaster_id_for_the_requested_login() {
+        let response = serde_json::json!({
+            "data":[{"id":"141981764","login":"twitchdev","display_name":"TwitchDev"}]
+        });
+        assert_eq!(
+            broadcaster_id_from_response(&response, "TwitchDev").unwrap(),
+            "141981764"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unexpected_or_unsafe_twitch_login() {
+        assert!(valid_twitch_login("some_streamer"));
+        assert!(!valid_twitch_login("some-streamer?redirect=1"));
+        let response = serde_json::json!({"data":[{"id":"123","login":"other"}]});
+        assert!(broadcaster_id_from_response(&response, "expected").is_err());
     }
 }

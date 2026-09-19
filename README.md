@@ -82,6 +82,8 @@ clipfarmer outcomes import metrics.jsonl
 
 `auth` reports the credential environment variables required by a platform. OAuth consent and token refresh remain the responsibility of the platform developer application; secrets are never persisted by ClipFarmer.
 
+Twitch publishing uses the channel login supplied to `run --channel` or `replay --channel`. It resolves and caches Twitch's numeric broadcaster ID automatically, so no broadcaster ID belongs in `.env`.
+
 ## Configuration
 
 See [`clipfarmer.toml.example`](clipfarmer.toml.example). Select the hosted model implementation with:

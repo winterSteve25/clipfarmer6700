@@ -331,8 +331,6 @@ pub struct PublisherConfig {
     pub twitch_token_env: String,
     #[serde(default = "twitch_client_env")]
     pub twitch_client_id_env: String,
-    #[serde(default = "twitch_broadcaster_env")]
-    pub twitch_broadcaster_id_env: String,
 }
 
 fn default_true() -> bool {
@@ -356,10 +354,6 @@ fn twitch_token_env() -> String {
 fn twitch_client_env() -> String {
     "TWITCH_CLIENT_ID".to_owned()
 }
-fn twitch_broadcaster_env() -> String {
-    "TWITCH_BROADCASTER_ID".to_owned()
-}
-
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
@@ -374,7 +368,6 @@ impl Default for PublisherConfig {
             tiktok_token_env: tiktok_token_env(),
             twitch_token_env: twitch_token_env(),
             twitch_client_id_env: twitch_client_env(),
-            twitch_broadcaster_id_env: twitch_broadcaster_env(),
         }
     }
 }

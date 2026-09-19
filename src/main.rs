@@ -331,11 +331,10 @@ fn build_publishers(cfg: &Config) -> Result<Vec<Arc<dyn Publisher>>> {
         }));
     }
     if cfg.publishers.twitch_clips {
-        publishers.push(Arc::new(TwitchClipPublisher {
-            access_token: read_secret(&cfg.publishers.twitch_token_env)?,
-            client_id: read_secret(&cfg.publishers.twitch_client_id_env)?,
-            broadcaster_id: read_secret(&cfg.publishers.twitch_broadcaster_id_env)?,
-        }));
+        publishers.push(Arc::new(TwitchClipPublisher::new(
+            read_secret(&cfg.publishers.twitch_token_env)?,
+            read_secret(&cfg.publishers.twitch_client_id_env)?,
+        )));
     }
     Ok(publishers)
 }
@@ -465,7 +464,6 @@ fn auth_status(cfg: &Config, platform: Platform) -> Result<()> {
         Platform::Twitch => vec![
             &cfg.publishers.twitch_token_env,
             &cfg.publishers.twitch_client_id_env,
-            &cfg.publishers.twitch_broadcaster_id_env,
         ],
     };
     for variable in variables {

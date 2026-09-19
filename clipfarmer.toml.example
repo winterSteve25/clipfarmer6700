@@ -58,8 +58,8 @@ endpoint_env = "S3_ENDPOINT"
 [publishers]
 dry_run = true
 youtube = true
-instagram = true
-tiktok_drafts = true
+instagram = false
+tiktok_drafts = false
 twitch_clips = false
 youtube_token_env = "YOUTUBE_ACCESS_TOKEN"
 instagram_token_env = "INSTAGRAM_ACCESS_TOKEN"
@@ -67,4 +67,3 @@ instagram_account_env = "INSTAGRAM_ACCOUNT_ID"
 tiktok_token_env = "TIKTOK_ACCESS_TOKEN"
 twitch_token_env = "TWITCH_ACCESS_TOKEN"
 twitch_client_id_env = "TWITCH_CLIENT_ID"
-twitch_broadcaster_id_env = "TWITCH_BROADCASTER_ID"

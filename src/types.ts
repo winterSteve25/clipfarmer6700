@@ -13,19 +13,24 @@ export type RunSummary = {
   publishFailures: number;
 };
 
+export type JobProgress = {
+  phase: string;
+  message: string;
+  elapsedMs: number;
+  capturedMs: number | null;
+  completedUnits?: number | null;
+  totalUnits?: number | null;
+  summary: RunSummary | null;
+};
+
 export type JobSnapshot = {
   id: string;
   source: { type: SourceMode; channel?: string; url?: string };
   channel: string | null;
   outputDir: string;
   status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
-  progress: {
-    phase: string;
-    message: string;
-    elapsedMs: number;
-    capturedMs: number | null;
-    summary: RunSummary | null;
-  };
+  progress: JobProgress;
+  history?: JobProgress[];
   summary: RunSummary | null;
   error: string | null;
   createdAtMs: number;

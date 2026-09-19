@@ -1,4 +1,3 @@
-import { isTauri } from "../config";
 import type { ConfigState, NavItem } from "../types";
 import { Icon } from "./Icon";
 
@@ -11,9 +10,7 @@ export function Sidebar({ nav, jobsCount, onNavigate }: { nav: NavItem; jobsCoun
       <button className={nav === "presets" ? "active" : ""} onClick={() => onNavigate("presets")}><Icon name="layers"/><span>Presets</span></button>
     </nav>
     <div className="sidebar-spacer"/>
-    <div className="system-card"><span className="system-dot"/><div><strong>Backend ready</strong><small>{isTauri() ? "Tauri connection active" : "Browser preview mode"}</small></div></div>
     <button className="sidebar-settings"><Icon name="settings"/><span>Settings</span></button>
-    <div className="version">ClipFarmer · v0.1.0</div>
   </aside>;
 }
 

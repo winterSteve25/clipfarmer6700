@@ -41,6 +41,8 @@ pub struct JobProgress {
     pub message: String,
     pub elapsed_ms: u64,
     pub captured_ms: Option<i64>,
+    pub completed_units: Option<usize>,
+    pub total_units: Option<usize>,
     pub summary: Option<RunSummaryDto>,
 }
 
@@ -197,14 +199,25 @@ impl LibraryRunner {
             Some(duration),
             None,
         );
-        let mut work = Box::pin(service.replay_file(&channel, &input, duration));
-        let mut pulse = tokio::time::interval(Duration::from_secs(2));
-        let summary = loop {
-            tokio::select! {
-                result = &mut work => break result?,
-                _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
-                _ = pulse.tick() => self.report("analyzing", "Analyzing the downloaded VOD", Some(duration), None),
-            }
+        let mut work = Box::pin(service.scan_file_with_progress(
+            &channel,
+            &input,
+            duration,
+            0,
+            |completed, total, summary| {
+                self.report_progress(
+                    "analyzing",
+                    format!("Analyzed window {completed} of {total}"),
+                    Some(duration),
+                    Some(summary),
+                    completed,
+                    total,
+                );
+            },
+        ));
+        let summary = tokio::select! {
+            result = &mut work => result?,
+            _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
         };
         drop(work);
         Ok(RunResult { channel, summary })
@@ -219,8 +232,8 @@ impl LibraryRunner {
             .join(channel)
             .join(format!("{}.ts", uuid::Uuid::new_v4()));
         self.report(
-            "starting",
-            format!("Starting live capture for {channel}"),
+            "starting_capture",
+            format!("Starting Twitch video capture for {channel}"),
             None,
             None,
         );
@@ -229,6 +242,12 @@ impl LibraryRunner {
         }
         .start(channel, &capture_path)
         .await?;
+        self.report(
+            "starting_chat",
+            format!("Starting Twitch chat capture for {channel}"),
+            None,
+            None,
+        );
         let mut chat = TwitchChatCapture {
             executable: self.config.media.chat_downloader_path.clone(),
         }
@@ -263,7 +282,22 @@ impl LibraryRunner {
                     let minimum_advance = self.config.worker.observer_step_seconds as i64 * 1_000;
                     if duration >= analyzed_through + minimum_advance {
                         let scan_start = analyzed_through.saturating_sub(120_000);
-                        let scan = service.scan_file(channel, &input, duration, scan_start);
+                        let scan = service.scan_file_with_progress(
+                            channel,
+                            &input,
+                            duration,
+                            scan_start,
+                            |completed, total, summary| {
+                                self.report_progress(
+                                    "analyzing",
+                                    format!("Analyzed window {completed} of {total}"),
+                                    Some(duration),
+                                    Some(summary),
+                                    completed,
+                                    total,
+                                );
+                            },
+                        );
                         let pass = tokio::select! {
                             result = scan => result?,
                             _ = cancellation.cancelled() => {
@@ -289,11 +323,21 @@ impl LibraryRunner {
                         Some(duration),
                         Some(&total),
                     );
-                    let scan = service.scan_file(
+                    let scan = service.scan_file_with_progress(
                         channel,
                         &input,
                         duration,
                         analyzed_through.saturating_sub(120_000),
+                        |completed, total, summary| {
+                            self.report_progress(
+                                "analyzing",
+                                format!("Analyzed window {completed} of {total}"),
+                                Some(duration),
+                                Some(summary),
+                                completed,
+                                total,
+                            );
+                        },
                     );
                     let pass = tokio::select! {
                         result = scan => result?,
@@ -321,12 +365,40 @@ impl LibraryRunner {
             message: message.into(),
             elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             captured_ms,
+            completed_units: None,
+            total_units: None,
+            summary: summary.map(RunSummaryDto::from),
+        });
+    }
+
+    fn report_progress(
+        &self,
+        phase: impl Into<String>,
+        message: impl Into<String>,
+        captured_ms: Option<i64>,
+        summary: Option<&RunSummary>,
+        completed_units: usize,
+        total_units: usize,
+    ) {
+        (self.progress)(JobProgress {
+            phase: phase.into(),
+            message: message.into(),
+            elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            captured_ms,
+            completed_units: Some(completed_units),
+            total_units: Some(total_units),
             summary: summary.map(RunSummaryDto::from),
         });
     }
 
     fn build_service(&self) -> Result<Service> {
         let cfg = &self.config;
+        self.report(
+            "loading_transcription",
+            format!("Loading {:?} transcription model", cfg.scribble.model_variant),
+            None,
+            None,
+        );
         let transcriber = Arc::new(ScribbleTranscriber::new(
             cfg.media.ffmpeg_path.clone(),
             &cfg.scribble.model_path,
@@ -336,6 +408,16 @@ impl LibraryRunner {
             cfg.scribble.enable_vad,
             cfg.scribble.incremental_min_window_seconds,
         )?);
+        self.report(
+            "configuring_models",
+            if self.deterministic_models {
+                "Selecting deterministic editorial models".to_owned()
+            } else {
+                format!("Configuring {:?} editorial models", cfg.models.provider)
+            },
+            None,
+            None,
+        );
         let (editorial, audio_analyzer): (
             Arc<dyn EditorialModel>,
             Arc<dyn CandidateAudioAnalyzer>,
@@ -384,6 +466,12 @@ impl LibraryRunner {
                 }
             }
         };
+        self.report(
+            "configuring_staging",
+            format!("Configuring {} object staging", cfg.staging.provider),
+            None,
+            None,
+        );
         let object_store: Arc<dyn ObjectStore> = match cfg.staging.provider.as_str() {
             "local" => Arc::new(LocalObjectStore {
                 root: cfg.data_dir.join("staging"),
@@ -401,6 +489,23 @@ impl LibraryRunner {
             }),
             provider => anyhow::bail!("unsupported staging provider {provider}"),
         };
+        self.report(
+            "configuring_publishers",
+            if cfg.publishers.dry_run {
+                "Configuring publishers in dry-run mode"
+            } else {
+                "Configuring live publishers"
+            },
+            None,
+            None,
+        );
+        let publishers = build_publishers(cfg)?;
+        self.report(
+            "opening_database",
+            "Opening the pipeline database",
+            None,
+            None,
+        );
         Service::new(
             cfg.clone(),
             ServiceDependencies {
@@ -417,7 +522,7 @@ impl LibraryRunner {
                     executable: cfg.media.ffmpeg_path.clone(),
                 }),
                 object_store,
-                publishers: build_publishers(cfg)?,
+                publishers,
             },
         )
     }

@@ -35,6 +35,7 @@ pub struct JobSnapshot {
     pub output_dir: PathBuf,
     pub status: JobStatus,
     pub progress: JobProgress,
+    pub history: Vec<JobProgress>,
     pub summary: Option<RunSummaryDto>,
     pub error: Option<String>,
     pub created_at_ms: u64,
@@ -78,6 +79,15 @@ impl JobManager {
         fs::create_dir_all(&output_dir)
             .map_err(|error| format!("create job output directory: {error}"))?;
         let (cancellation, receiver) = CancellationHandle::new();
+        let queued_progress = JobProgress {
+            phase: "queued".to_owned(),
+            message: "Waiting for the background worker to start".to_owned(),
+            elapsed_ms: 0,
+            captured_ms: None,
+            completed_units: None,
+            total_units: None,
+            summary: None,
+        };
         let snapshot = JobSnapshot {
             id: id.clone(),
             source: source.clone(),
@@ -87,13 +97,8 @@ impl JobManager {
             },
             output_dir,
             status: JobStatus::Queued,
-            progress: JobProgress {
-                phase: "queued".to_owned(),
-                message: "Job queued".to_owned(),
-                elapsed_ms: 0,
-                captured_ms: None,
-                summary: None,
-            },
+            progress: queued_progress.clone(),
+            history: vec![queued_progress],
             summary: None,
             error: None,
             created_at_ms: now_ms(),
@@ -121,6 +126,7 @@ impl JobManager {
                         job.status = JobStatus::Running;
                         job.progress.phase = "starting".to_owned();
                         job.progress.message = "Initializing ClipFarmer".to_owned();
+                        record_progress(job);
                     }
                 });
                 let event_manager = manager.clone();
@@ -130,6 +136,7 @@ impl JobManager {
                     LibraryRunner::load(config, job_root, model_paths, false, move |progress| {
                         event_manager.update(&event_app, &event_id, |job| {
                             job.progress = progress;
+                            record_progress(job);
                         });
                     });
                 let result = runner.and_then(|runner| {
@@ -148,12 +155,14 @@ impl JobManager {
                         job.progress.message = "Clipping job completed".to_owned();
                         job.progress.summary = job.summary.clone();
                         job.finished_at_ms = Some(now_ms());
+                        record_progress(job);
                     }),
                     Err(error) if is_cancelled(&error) => manager.update(&app, &id, |job| {
                         job.status = JobStatus::Cancelled;
                         job.progress.phase = "cancelled".to_owned();
                         job.progress.message = "Clipping job cancelled".to_owned();
                         job.finished_at_ms = Some(now_ms());
+                        record_progress(job);
                     }),
                     Err(error) => manager.update(&app, &id, |job| {
                         job.status = JobStatus::Failed;
@@ -161,6 +170,7 @@ impl JobManager {
                         job.progress.message = "Clipping job failed".to_owned();
                         job.error = Some(format!("{error:#}"));
                         job.finished_at_ms = Some(now_ms());
+                        record_progress(job);
                     }),
                 }
             })
@@ -197,6 +207,7 @@ impl JobManager {
                 entry.snapshot.status = JobStatus::Cancelling;
                 entry.snapshot.progress.phase = "cancelling".to_owned();
                 entry.snapshot.progress.message = "Stopping clipping job".to_owned();
+                record_progress(&mut entry.snapshot);
             }
             entry.snapshot.clone()
         };
@@ -325,6 +336,20 @@ fn validate_source(source: &JobSource) -> Result<(), String> {
 
 fn emit_snapshot(app: &AppHandle, snapshot: &JobSnapshot) {
     let _ = app.emit(JOB_PROGRESS_EVENT, snapshot);
+}
+
+fn record_progress(job: &mut JobSnapshot) {
+    if let Some(last) = job.history.last_mut() {
+        if last.phase == job.progress.phase && last.message == job.progress.message {
+            *last = job.progress.clone();
+            return;
+        }
+    }
+    job.history.push(job.progress.clone());
+    const MAX_HISTORY: usize = 200;
+    if job.history.len() > MAX_HISTORY {
+        job.history.drain(..job.history.len() - MAX_HISTORY);
+    }
 }
 
 fn now_ms() -> u64 {

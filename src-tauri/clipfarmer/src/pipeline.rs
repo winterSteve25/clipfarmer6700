@@ -97,6 +97,24 @@ impl Service {
         duration_ms: i64,
         scan_start_ms: i64,
     ) -> Result<RunSummary> {
+        self.scan_file_with_progress(
+            channel_id,
+            input_path,
+            duration_ms,
+            scan_start_ms,
+            |_, _, _| {},
+        )
+        .await
+    }
+
+    pub async fn scan_file_with_progress(
+        &self,
+        channel_id: &str,
+        input_path: &str,
+        duration_ms: i64,
+        scan_start_ms: i64,
+        mut on_progress: impl FnMut(usize, usize, &RunSummary),
+    ) -> Result<RunSummary> {
         ensure!(duration_ms >= 5_000, "input is too short to contain a clip");
         ensure!(Path::new(input_path).exists(), "input media does not exist");
 
@@ -253,6 +271,11 @@ impl Service {
                 &mut summary,
             )
             .await?;
+            on_progress(
+                window_number.max(0) as usize,
+                total_windows.max(1) as usize,
+                &summary,
+            );
             if cursor == duration_ms {
                 break;
             }

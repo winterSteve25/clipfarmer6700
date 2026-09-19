@@ -9,7 +9,7 @@
   --green: #35d49a; --red: #f06a7d; --amber: #e6b85c;
 }
 * { box-sizing: border-box; }
-html, body, #root { margin: 0; min-width: 320px; min-height: 100%; }
+html, body, #root { margin: 0; min-width: 352px; min-height: 100%; }
 body { background: var(--bg); overflow: hidden; }
 button, input, select { font: inherit; } button { color: inherit; }
-.icon { display: block; flex: 0 0 auto; }
+.icon { display: block; flex: 0 0 auto; transform: scale(1.1); transform-origin: center; }

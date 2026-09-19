@@ -1,7 +1,7 @@
 //! Concrete boundaries for local media tools and hosted model calls.
 use crate::{
     domain::{Candidate, EditManifest, LocalSignals, Outcome, TranscriptSegment, VisualSample},
-    manifest::{render_srt, validate_manifest, validate_object_key, validate_safe_path},
+    manifest::{render_ass, validate_manifest, validate_object_key, validate_safe_path},
     progress::{self, ByteProgress, Step},
 };
 use anyhow::{Context, Result, ensure};
@@ -388,8 +388,15 @@ impl Renderer for FfmpegRenderer {
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        let srt_path = output.with_extension("srt");
-        fs::write(&srt_path, render_srt(&manifest.captions))?;
+        let subtitle_path = output.with_extension("ass");
+        fs::write(
+            &subtitle_path,
+            render_ass(
+                &manifest.captions,
+                manifest.hook_text.as_deref(),
+                manifest.source_end_ms - manifest.source_start_ms,
+            ),
+        )?;
         let scale = match manifest.layout.as_str() {
             "full_frame" => {
                 "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
@@ -403,23 +410,14 @@ impl Renderer for FfmpegRenderer {
             }
         };
         let mut filters = vec![scale.to_owned()];
-        if !manifest.captions.is_empty() {
-            let escaped_subtitle = ffmpeg_filter_path(&srt_path);
-            filters.push(format!(
-                "subtitles=filename='{escaped_subtitle}':force_style='Alignment=2,FontSize=18,Outline=3,MarginV=160'"
-            ));
-        }
-        if let Some(hook) = manifest
-            .hook_text
-            .as_deref()
-            .filter(|hook| !hook.trim().is_empty())
+        if !manifest.captions.is_empty()
+            || manifest
+                .hook_text
+                .as_deref()
+                .is_some_and(|hook| !hook.trim().is_empty())
         {
-            let hook_path = output.with_extension("hook.txt");
-            fs::write(&hook_path, hook.replace(['\0', '\r', '\n'], " "))?;
-            let escaped_hook = ffmpeg_filter_path(&hook_path);
-            filters.push(format!(
-                "drawtext=textfile='{escaped_hook}':expansion=none:fontcolor=white:fontsize=58:borderw=5:bordercolor=black:x=(w-text_w)/2:y=h*0.12"
-            ));
+            let escaped_subtitle = ffmpeg_filter_path(&subtitle_path);
+            filters.push(format!("ass=filename='{escaped_subtitle}'"));
         }
         let filter = filters.join(",");
         let rendered = tokio::process::Command::new(&self.executable)

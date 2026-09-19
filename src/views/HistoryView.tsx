@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { JobProgress, JobSnapshot, RunSummary } from "../types";
 import { Icon } from "../components/Icon";
 
@@ -96,10 +97,12 @@ function ActivityTimeline({ events }: { events: JobProgress[] }) {
   </ol>;
 }
 
-function JobCard({ job, onCancel }: { job: JobSnapshot; onCancel: (id: string) => void }) {
+function JobCard({ job, now, onCancel }: { job: JobSnapshot; now: number; onCancel: (id: string) => void }) {
   const summary = latestSummary(job);
   const active = ACTIVE_STATUSES.has(job.status);
-  const runtime = job.finishedAtMs ? job.finishedAtMs - job.createdAtMs : job.progress.elapsedMs;
+  const runtime = job.finishedAtMs
+    ? job.finishedAtMs - job.createdAtMs
+    : Math.max(job.progress.elapsedMs, active ? now - job.createdAtMs : 0);
   const history = job.history?.length ? job.history : [job.progress];
   const percent = progressPercent(job.progress);
   return <details className={`job-card ${job.status}`} open={active || job.status === "failed"}>
@@ -148,6 +151,14 @@ function JobCard({ job, onCancel }: { job: JobSnapshot; onCancel: (id: string) =
 }
 
 export function HistoryView({ jobs, onCancel, onNewRun }: { jobs: JobSnapshot[]; onCancel: (id: string) => void; onNewRun: () => void }) {
+  const hasActiveJobs = jobs.some((job) => ACTIVE_STATUSES.has(job.status));
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!hasActiveJobs) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [hasActiveJobs]);
   const accepted = jobs.reduce((sum, job) => sum + (latestSummary(job)?.candidatesAccepted ?? 0), 0);
   const rejected = jobs.reduce((sum, job) => sum + (latestSummary(job)?.candidatesRejected ?? 0), 0);
   const failed = jobs.filter((job) => job.status === "failed").length;
@@ -155,7 +166,7 @@ export function HistoryView({ jobs, onCancel, onNewRun }: { jobs: JobSnapshot[];
     <div className="history-summary"><SummaryPill label="Runs" value={jobs.length}/><SummaryPill label="Approved" value={accepted} tone="good"/><SummaryPill label="Rejected" value={rejected}/><SummaryPill label="Failed runs" value={failed} tone={failed ? "bad" : undefined}/></div>
     <div className="history-card">
       <div className="history-card-head"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Clipping runs</h2></div><button className="primary-small" onClick={onNewRun}><Icon name="plus" size={15}/>New run</button></div>
-      {jobs.length ? <div className="job-list">{jobs.map((job) => <JobCard key={job.id} job={job} onCancel={onCancel}/>)}</div> : <div className="empty-state"><span><Icon name="film" size={28}/></span><h3>No runs yet</h3><p>Start a live channel or VOD run to see progress, diagnostics, and result totals here.</p><button onClick={onNewRun}>Configure first run</button></div>}
+      {jobs.length ? <div className="job-list">{jobs.map((job) => <JobCard key={job.id} job={job} now={now} onCancel={onCancel}/>)}</div> : <div className="empty-state"><span><Icon name="film" size={28}/></span><h3>No runs yet</h3><p>Start a live channel or VOD run to see progress, diagnostics, and result totals here.</p><button onClick={onNewRun}>Configure first run</button></div>}
     </div>
   </section>;
 }

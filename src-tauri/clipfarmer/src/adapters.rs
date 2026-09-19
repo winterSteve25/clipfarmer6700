@@ -715,7 +715,7 @@ impl TwitchVodSource {
                 progress::bytes(size)
             ));
         } else {
-            self.download_chat(&canonical_url, &chat_path).await?;
+            // self.download_chat(&canonical_url, &chat_path).await?;
         }
         Ok(PreparedTwitchVod {
             id,
@@ -1013,10 +1013,10 @@ async fn curl_json_authenticated(
     } else {
         None
     };
-    command.arg("--").arg(url);
     let output_result = match secret_header {
-        Some((name, value)) => run_curl_with_secret_header(command, name, value).await,
+        Some((name, value)) => run_curl_with_secret_header(command, name, value, url).await,
         None => {
+            append_curl_target(&mut command, url, false);
             command.kill_on_drop(true);
             command.output().await.context("run curl")
         }
@@ -1052,19 +1052,26 @@ fn write_private(path: &Path, contents: Vec<u8>) -> Result<()> {
 pub(crate) async fn run_curl(
     mut command: tokio::process::Command,
     bearer_token: &str,
+    url: &str,
 ) -> Result<std::process::Output> {
+    ensure!(
+        !url.contains(['\0', '\n', '\r']),
+        "unsafe HTTP configuration"
+    );
     if bearer_token.is_empty() {
+        append_curl_target(&mut command, url, false);
         command.kill_on_drop(true);
         return command.output().await.context("run curl");
     }
     let value = format!("Bearer {bearer_token}");
-    run_curl_with_secret_header(command, "Authorization", &value).await
+    run_curl_with_secret_header(command, "Authorization", &value, url).await
 }
 
 async fn run_curl_with_secret_header(
     mut command: tokio::process::Command,
     name: &str,
     value: &str,
+    url: &str,
 ) -> Result<std::process::Output> {
     ensure!(
         !name.is_empty()
@@ -1075,8 +1082,8 @@ async fn run_curl_with_secret_header(
         "unsafe secret HTTP header"
     );
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    append_curl_target(&mut command, url, true);
     command
-        .args(["--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1090,9 +1097,34 @@ async fn run_curl_with_secret_header(
     child.wait_with_output().await.context("wait for curl")
 }
 
+fn append_curl_target(command: &mut tokio::process::Command, url: &str, stdin_config: bool) {
+    // Curl continues parsing options after a URL. Put the stdin config option before `--`,
+    // otherwise `--config` and `-` are treated as additional URLs.
+    if stdin_config {
+        command.args(["--config", "-"]);
+    }
+    command.arg("--").arg(url);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puts_secret_config_before_curl_end_of_options_and_url() {
+        let mut command = tokio::process::Command::new("curl");
+        command.arg("--silent");
+        append_curl_target(&mut command, "https://example.com", true);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            ["--silent", "--config", "-", "--", "https://example.com"]
+        );
+    }
 
     #[test]
     fn parses_scribble_json_and_averages_token_confidence() {

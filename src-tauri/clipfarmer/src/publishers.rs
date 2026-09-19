@@ -46,17 +46,34 @@ impl Publisher for YouTubePublisher {
         let mut command = tokio::process::Command::new("curl");
         command
             .args([
-                "--fail-with-body", "--silent", "--show-error", "--request", "POST",
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--request",
+                "POST",
                 "--dump-header",
             ])
             .arg(&header_path)
-            .args(["--header", "Content-Type: application/json; charset=UTF-8", "--header"])
-            .arg(format!("X-Upload-Content-Length: {}", fs::metadata(local_asset)?.len()))
-            .args(["--header", "X-Upload-Content-Type: video/mp4", "--data-binary"])
-            .arg(metadata.to_string())
-            .arg("--")
-            .arg("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status");
-        let initiate = run_curl(command, &self.access_token)
+            .args([
+                "--header",
+                "Content-Type: application/json; charset=UTF-8",
+                "--header",
+            ])
+            .arg(format!(
+                "X-Upload-Content-Length: {}",
+                fs::metadata(local_asset)?.len()
+            ))
+            .args([
+                "--header",
+                "X-Upload-Content-Type: video/mp4",
+                "--data-binary",
+            ])
+            .arg(metadata.to_string());
+        let initiate = run_curl(
+            command,
+            &self.access_token,
+            "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        )
             .await
             .context("start YouTube resumable upload")?;
         ensure!(
@@ -389,12 +406,10 @@ async fn curl_upload(
         ensure!(!header.contains(['\r', '\n']), "unsafe upload header");
         command.arg("--header").arg(header);
     }
-    command
-        .arg("--data-binary")
-        .arg(format!("@{local_path}"))
-        .arg("--")
-        .arg(url);
-    let output = run_curl(command, token).await.context("upload media")?;
+    command.arg("--data-binary").arg(format!("@{local_path}"));
+    let output = run_curl(command, token, url)
+        .await
+        .context("upload media")?;
     ensure!(
         output.status.success(),
         "media upload failed: {}",

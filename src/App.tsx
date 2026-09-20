@@ -5,9 +5,10 @@ import { Notice, Sidebar, Topbar } from "./components/AppChrome";
 import { ConfigurationPanel } from "./components/ConfigurationPanel";
 import { DecisionPreview } from "./components/DecisionPreview";
 import { buildBackendConfig, buildOutputPreview, isSourceValid, isTauri, loadConfig } from "./config";
-import type { JobSnapshot, NavItem, OpenSections, PreviewTab, SourceMode } from "./types";
+import type { JobSnapshot, NavItem, OpenSections, PreviewTab, PublisherAccount, PublisherCredentials, PublisherPlatform, SourceMode } from "./types";
 import { HistoryView } from "./views/HistoryView";
 import { PresetsView } from "./views/PresetsView";
+import { SettingsView } from "./views/SettingsView";
 import "./App.css";
 
 const DEFAULT_OPEN_SECTIONS: OpenSections = {
@@ -29,17 +30,43 @@ function App() {
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [accounts, setAccounts] = useState<PublisherAccount[]>([]);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [busyPlatform, setBusyPlatform] = useState<PublisherPlatform | null>(null);
+  const [connectionPrompt, setConnectionPrompt] = useState<PublisherPlatform | null>(null);
 
   useEffect(() => {
     localStorage.setItem("clipfarmer-config", JSON.stringify(config));
   }, [config]);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      setAccountsLoaded(true);
+      setConfig((current) => ({ ...current, youtube: false, instagram: false, tiktokDrafts: false, twitchClips: false }));
+      return;
+    }
 
     invoke<JobSnapshot[]>("list_clipping_jobs")
       .then(setJobs)
       .catch((error) => setNotice(String(error)));
+
+    invoke<PublisherAccount[]>("list_publisher_accounts")
+      .then((nextAccounts) => {
+        setAccounts(nextAccounts);
+        const connected = (platform: PublisherPlatform) => nextAccounts.some((account) => account.platform === platform && account.connected);
+        setConfig((current) => ({
+          ...current,
+          youtube: current.youtube && connected("youtube"),
+          instagram: current.instagram && connected("instagram"),
+          tiktokDrafts: current.tiktokDrafts && connected("tiktok"),
+          twitchClips: current.twitchClips && connected("twitch"),
+        }));
+        setAccountsLoaded(true);
+      })
+      .catch((error) => {
+        setAccountsLoaded(true);
+        setNotice(String(error));
+      });
 
     let dispose: (() => void) | undefined;
     listen<JobSnapshot>("clipfarmer-job-progress", (event) => {
@@ -123,10 +150,62 @@ function App() {
     window.setTimeout(() => setCopied(false), 1400);
   }
 
+  function isConnected(platform: PublisherPlatform) {
+    return accounts.some((account) => account.platform === platform && account.connected);
+  }
+
+  function changePublisher(platform: PublisherPlatform, enabled: boolean) {
+    const configKey = { youtube: "youtube", tiktok: "tiktokDrafts", instagram: "instagram", twitch: "twitchClips" }[platform] as "youtube" | "tiktokDrafts" | "instagram" | "twitchClips";
+    if (enabled && accountsLoaded && !isConnected(platform)) {
+      setConnectionPrompt(platform);
+      return;
+    }
+    setConnectionPrompt(null);
+    setConfig((current) => ({ ...current, [configKey]: enabled }));
+  }
+
+  function openSettings() {
+    setConnectionPrompt(null);
+    setNav("settings");
+  }
+
+  async function connectAccount(platform: PublisherPlatform, credentials: PublisherCredentials) {
+    if (!isTauri()) {
+      setNotice("Account connections are available in the ClipFarmer desktop app.");
+      return false;
+    }
+    setBusyPlatform(platform);
+    setNotice(null);
+    try {
+      const nextAccounts = await invoke<PublisherAccount[]>("connect_publisher_account", { platform, credentials });
+      setAccounts(nextAccounts);
+      return true;
+    } catch (error) {
+      setNotice(String(error));
+      return false;
+    } finally {
+      setBusyPlatform(null);
+    }
+  }
+
+  async function disconnectAccount(platform: PublisherPlatform) {
+    setBusyPlatform(platform);
+    setNotice(null);
+    try {
+      const nextAccounts = await invoke<PublisherAccount[]>("disconnect_publisher_account", { platform });
+      setAccounts(nextAccounts);
+      changePublisher(platform, false);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusyPlatform(null);
+    }
+  }
+
   return <div className="app-shell">
     <Sidebar nav={nav} jobsCount={jobs.length} onNavigate={setNav}/>
     <main className="workspace">
-      <Topbar nav={nav} config={config}/>
+      <Topbar nav={nav} config={config} onOpenSettings={openSettings}/>
       {notice && (
         <Notice message={notice} onDismiss={() => setNotice(null)}/>
       )}
@@ -145,6 +224,12 @@ function App() {
           onSourceValue={setSourceValue}
           onToggleSection={toggleSection}
           onSubmit={startRun}
+          accounts={accounts}
+          accountsLoaded={accountsLoaded}
+          connectionPrompt={connectionPrompt}
+          onPublisherChange={changePublisher}
+          onOpenSettings={openSettings}
+          onDismissConnectionPrompt={() => setConnectionPrompt(null)}
         />
         <DecisionPreview
           config={config}
@@ -161,6 +246,9 @@ function App() {
       )}
       {nav === "presets" && (
         <PresetsView config={config} setConfig={setConfig} onUse={() => setNav("new")}/>
+      )}
+      {nav === "settings" && (
+        <SettingsView accounts={accounts} busyPlatform={busyPlatform} onConnect={connectAccount} onDisconnect={disconnectAccount}/>
       )}
     </main>
   </div>;

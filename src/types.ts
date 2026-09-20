@@ -2,7 +2,19 @@ export type SourceMode = "channel" | "vod";
 export type Provider = "gemini" | "openai";
 export type ScribbleModel = "large_turbo" | "tiny";
 export type PreviewTab = "approved" | "rejected";
-export type NavItem = "new" | "jobs" | "presets";
+export type NavItem = "new" | "jobs" | "presets" | "settings";
+export type PublisherPlatform = "youtube" | "tiktok" | "instagram" | "twitch";
+
+export type PublisherAccount = {
+  platform: PublisherPlatform;
+  connected: boolean;
+};
+
+export type PublisherCredentials = {
+  accessToken: string;
+  accountId?: string;
+  clientId?: string;
+};
 
 export type RunSummary = {
   windowsObserved: number;

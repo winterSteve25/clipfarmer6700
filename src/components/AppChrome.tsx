@@ -10,7 +10,7 @@ export function Sidebar({ nav, jobsCount, onNavigate }: { nav: NavItem; jobsCoun
       <button className={nav === "presets" ? "active" : ""} onClick={() => onNavigate("presets")}><Icon name="layers"/><span>Presets</span></button>
     </nav>
     <div className="sidebar-spacer"/>
-    <button className="sidebar-settings"><Icon name="settings"/><span>Settings</span></button>
+    <button className={`sidebar-settings ${nav === "settings" ? "active" : ""}`} onClick={() => onNavigate("settings")}><Icon name="settings"/><span>Settings</span></button>
   </aside>;
 }
 
@@ -18,11 +18,12 @@ const pageCopy: Record<NavItem, { crumb: string; title: string }> = {
   new: { crumb: "NEW RUN", title: "Configure a clipping run" },
   jobs: { crumb: "RUN HISTORY", title: "Run history" },
   presets: { crumb: "PRESETS", title: "Configuration presets" },
+  settings: { crumb: "SETTINGS", title: "Account connections" },
 };
 
-export function Topbar({ nav, config }: { nav: NavItem; config: ConfigState }) {
+export function Topbar({ nav, config, onOpenSettings }: { nav: NavItem; config: ConfigState; onOpenSettings: () => void }) {
   const copy = pageCopy[nav];
-  return <header className="topbar"><div><p>WORKSPACE / {copy.crumb}</p><h1>{copy.title}</h1></div><div className="topbar-actions"><span className="mode-badge"><span/>{config.dryRun ? "Safe mode" : "Publishing live"}</span><button className="icon-button" title="Settings"><Icon name="settings"/></button></div></header>;
+  return <header className="topbar"><div><p>WORKSPACE / {copy.crumb}</p><h1>{copy.title}</h1></div><div className="topbar-actions"><span className="mode-badge"><span/>{config.dryRun ? "Safe mode" : "Publishing live"}</span><button className={`icon-button ${nav === "settings" ? "active" : ""}`} aria-label="Open settings" title="Settings" onClick={onOpenSettings}><Icon name="settings"/></button></div></header>;
 }
 
 export function Notice({ message, onDismiss }: { message: string; onDismiss: () => void }) {

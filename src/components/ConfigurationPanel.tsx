@@ -1,6 +1,6 @@
 import type { Dispatch, FormEvent, SetStateAction } from "react";
 import { DEFAULT_CONFIG } from "../config";
-import type { ConfigState, OpenSections, SourceMode } from "../types";
+import type { ConfigState, OpenSections, PublisherAccount, PublisherPlatform, SourceMode } from "../types";
 import { Field, NumberInput, Section, Toggle } from "./FormControls";
 import { Icon } from "./Icon";
 
@@ -17,6 +17,26 @@ type Props = {
   onSourceValue: (value: string) => void;
   onToggleSection: (section: keyof OpenSections) => void;
   onSubmit: (event: FormEvent) => void;
+  accounts: PublisherAccount[];
+  accountsLoaded: boolean;
+  connectionPrompt: PublisherPlatform | null;
+  onPublisherChange: (platform: PublisherPlatform, enabled: boolean) => void;
+  onOpenSettings: () => void;
+  onDismissConnectionPrompt: () => void;
+};
+
+const PUBLISHERS: Array<{ platform: PublisherPlatform; key: "youtube" | "instagram" | "tiktokDrafts" | "twitchClips"; label: string; monogram: string }> = [
+  { platform: "youtube", key: "youtube", label: "YouTube Shorts", monogram: "YT" },
+  { platform: "instagram", key: "instagram", label: "Instagram Reels", monogram: "IG" },
+  { platform: "tiktok", key: "tiktokDrafts", label: "TikTok drafts", monogram: "TT" },
+  { platform: "twitch", key: "twitchClips", label: "Twitch clips", monogram: "TW" },
+];
+
+const PLATFORM_NAMES: Record<PublisherPlatform, string> = {
+  youtube: "YouTube",
+  tiktok: "TikTok",
+  instagram: "Instagram",
+  twitch: "Twitch",
 };
 
 export function ConfigurationPanel(props: Props) {
@@ -31,7 +51,7 @@ export function ConfigurationPanel(props: Props) {
       <label className="source-input"><span>{sourceMode === "channel" ? "twitch.tv/" : "URL"}</span><input value={sourceValue} onChange={(event) => props.onSourceValue(event.target.value)} aria-label={sourceMode === "channel" ? "Twitch channel" : "Twitch VOD URL"}/><span className={`validity ${sourceValid ? "valid" : ""}`}><Icon name={sourceValid ? "check" : "x"} size={15}/></span></label>
     </div>
 
-    <div className="config-header"><div><span className="eyebrow">02 · CONFIGURATION</span><h2>Shape the editorial pipeline</h2></div><button type="button" className="reset-button" onClick={() => setConfig(DEFAULT_CONFIG)}><Icon name="refresh" size={15}/>Reset defaults</button></div>
+    <div className="config-header"><div><span className="eyebrow">02 · CONFIGURATION</span><h2>Shape the editorial pipeline</h2></div><button type="button" className="reset-button" onClick={() => setConfig({ ...DEFAULT_CONFIG, youtube: props.accounts.some((account) => account.platform === "youtube" && account.connected) })}><Icon name="refresh" size={15}/>Reset defaults</button></div>
     <div className="sections">
       <Section icon="sliders" title="Capture & timing" description={`${config.observerWindowSeconds}s window · ${config.ringMinutes}m buffer`} open={openSections.capture} onToggle={() => props.onToggleSection("capture")}>
         <div className="field-grid"><Field label="Observer window" hint="Context sent for each decision"><NumberInput value={config.observerWindowSeconds} onChange={(value) => set("observerWindowSeconds", value)} suffix="sec"/></Field><Field label="Observer step" hint="How often a window advances"><NumberInput value={config.observerStepSeconds} onChange={(value) => set("observerStepSeconds", value)} suffix="sec"/></Field><Field label="Maturation delay"><NumberInput value={config.maturationDelaySeconds} onChange={(value) => set("maturationDelaySeconds", value)} suffix="sec"/></Field><Field label="Rolling buffer"><NumberInput value={config.ringMinutes} onChange={(value) => set("ringMinutes", value)} suffix="min"/></Field><Field label="Live poll interval"><NumberInput value={config.pollSeconds} onChange={(value) => set("pollSeconds", value)} min={5} suffix="sec"/></Field><Field label="Visual sample interval"><NumberInput value={config.frameIntervalSeconds} onChange={(value) => set("frameIntervalSeconds", value)} min={2} suffix="sec"/></Field></div>
@@ -47,7 +67,11 @@ export function ConfigurationPanel(props: Props) {
 
       <Section icon="send" title="Publishing" description={`${config.dryRun ? "Dry run" : "Live"} · ${platformCount} destination${platformCount === 1 ? "" : "s"}`} open={openSections.publishing} onToggle={() => props.onToggleSection("publishing")}>
         <div className="toggle-field prominent"><div><strong>Dry run</strong><small>Render outputs without posting to connected platforms</small></div><Toggle label="Dry run" checked={config.dryRun} onChange={(value) => set("dryRun", value)}/></div>
-        <div className="platform-list">{([ ["youtube", "YouTube Shorts", "YT", config.youtube], ["instagram", "Instagram Reels", "IG", config.instagram], ["tiktokDrafts", "TikTok drafts", "TT", config.tiktokDrafts], ["twitchClips", "Twitch clips", "TW", config.twitchClips] ] as const).map(([key, label, monogram, checked]) => <div className="platform-row" key={key}><span className={`platform-icon ${key}`}>{monogram}</span><span>{label}</span><Toggle label={label} checked={checked} onChange={(value) => set(key, value)}/></div>)}</div>
+        {props.connectionPrompt && <div className="connection-prompt" role="alert"><span className="connection-prompt-icon"><Icon name="settings" size={17}/></span><div><strong>Connect {PLATFORM_NAMES[props.connectionPrompt]} first</strong><p>Publishing is still off for this destination. Connect your account in Settings, then try again.</p><button type="button" onClick={props.onOpenSettings}>Go to Settings <Icon name="chevron" size={13}/></button></div><button type="button" className="connection-prompt-close" aria-label="Dismiss account connection prompt" onClick={props.onDismissConnectionPrompt}><Icon name="x" size={15}/></button></div>}
+        <div className="platform-list">{PUBLISHERS.map(({ platform, key, label, monogram }) => {
+          const connected = props.accounts.some((account) => account.platform === platform && account.connected);
+          return <div className="platform-row" key={key}><span className={`platform-icon ${key}`}>{monogram}</span><span className="platform-name">{label}<small>{!props.accountsLoaded ? "Checking account…" : connected ? "Connected" : "Account required"}</small></span><Toggle label={`${label} publishing`} checked={config[key]} onChange={(value) => props.onPublisherChange(platform, value)}/></div>;
+        })}</div>
       </Section>
 
       <Section icon="settings" title="Advanced" description={`${config.stagingProvider} staging · ${config.maxAttempts} attempts`} open={openSections.advanced} onToggle={() => props.onToggleSection("advanced")}>

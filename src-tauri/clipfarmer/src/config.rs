@@ -232,13 +232,13 @@ impl Default for ModelSelectionConfig {
 pub struct OpenAiConfig {
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
-    #[serde(default = "default_observer_model")]
+    #[serde(default = "default_luna_model")]
     pub observer_model: String,
-    #[serde(default = "default_sol_model")]
+    #[serde(default = "default_luna_model")]
     pub director_model: String,
-    #[serde(default = "default_sol_model")]
+    #[serde(default = "default_luna_model")]
     pub editor_model: String,
-    #[serde(default = "default_sol_model")]
+    #[serde(default = "default_luna_model")]
     pub critic_model: String,
     #[serde(default = "default_audio_model")]
     pub audio_model: String,
@@ -247,11 +247,8 @@ pub struct OpenAiConfig {
 fn default_api_key_env() -> String {
     "CLIPFARMER_OPENAI_KEY".to_owned()
 }
-fn default_observer_model() -> String {
-    "gpt-5.6-terra".to_owned()
-}
-fn default_sol_model() -> String {
-    "gpt-5.6-sol".to_owned()
+fn default_luna_model() -> String {
+    "gpt-5.6-luna".to_owned()
 }
 fn default_audio_model() -> String {
     "gpt-audio-1.5".to_owned()
@@ -261,10 +258,10 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             api_key_env: default_api_key_env(),
-            observer_model: default_observer_model(),
-            director_model: default_sol_model(),
-            editor_model: default_sol_model(),
-            critic_model: default_sol_model(),
+            observer_model: default_luna_model(),
+            director_model: default_luna_model(),
+            editor_model: default_luna_model(),
+            critic_model: default_luna_model(),
             audio_model: default_audio_model(),
         }
     }
@@ -450,19 +447,15 @@ impl Config {
         );
         match self.models.provider {
             ModelProvider::OpenAi => {
+                let models = [
+                    &self.openai.observer_model,
+                    &self.openai.director_model,
+                    &self.openai.editor_model,
+                    &self.openai.critic_model,
+                ];
                 ensure!(
-                    self.openai.observer_model == "gpt-5.6-terra",
-                    "OpenAI observer model must be gpt-5.6-terra for this architecture"
-                );
-                ensure!(
-                    [
-                        &self.openai.director_model,
-                        &self.openai.editor_model,
-                        &self.openai.critic_model
-                    ]
-                    .iter()
-                    .all(|model| model.as_str() == "gpt-5.6-sol"),
-                    "OpenAI director, editor, and critic must use gpt-5.6-sol"
+                    models.iter().all(|model| model.as_str() == "gpt-5.6-luna"),
+                    "OpenAI observer, director, editor, and critic must use gpt-5.6-luna"
                 );
                 ensure!(
                     self.openai.audio_model == "gpt-audio-1.5",
@@ -520,6 +513,16 @@ mod tests {
         assert_eq!(config.worker.poll_seconds, 10);
         assert_eq!(config.models.provider, ModelProvider::OpenAi);
         assert_eq!(config.openai.api_key_env, "CLIPFARMER_OPENAI_KEY");
+        assert!(
+            [
+                &config.openai.observer_model,
+                &config.openai.director_model,
+                &config.openai.editor_model,
+                &config.openai.critic_model,
+            ]
+            .iter()
+            .all(|model| model.as_str() == "gpt-5.6-luna")
+        );
         assert!(config.models.visual_evidence);
         assert!(config.models.audio_analysis);
         assert!(config.models.chat_evidence);

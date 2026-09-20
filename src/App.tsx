@@ -5,6 +5,7 @@ import { Notice, Sidebar, Topbar } from "./components/AppChrome";
 import { ConfigurationPanel } from "./components/ConfigurationPanel";
 import { DecisionPreview } from "./components/DecisionPreview";
 import { buildBackendConfig, buildOutputPreview, isSourceValid, isTauri, loadConfig } from "./config";
+import { captureFrontendError } from "./sentry";
 import type { JobSnapshot, NavItem, OpenSections, PreviewTab, PublisherAccount, PublisherCredentials, PublisherPlatform, SourceMode } from "./types";
 import { HistoryView } from "./views/HistoryView";
 import { PresetsView } from "./views/PresetsView";
@@ -48,7 +49,10 @@ function App() {
 
     invoke<JobSnapshot[]>("list_clipping_jobs")
       .then(setJobs)
-      .catch((error) => setNotice(String(error)));
+      .catch((error) => {
+        captureFrontendError(error, "list_clipping_jobs");
+        setNotice(String(error));
+      });
 
     invoke<PublisherAccount[]>("list_publisher_accounts")
       .then((nextAccounts) => {
@@ -64,6 +68,7 @@ function App() {
         setAccountsLoaded(true);
       })
       .catch((error) => {
+        captureFrontendError(error, "list_publisher_accounts");
         setAccountsLoaded(true);
         setNotice(String(error));
       });
@@ -74,7 +79,10 @@ function App() {
         event.payload,
         ...current.filter((job) => job.id !== event.payload.id),
       ]);
-    }).then((unlisten) => { dispose = unlisten; });
+    }).then((unlisten) => { dispose = unlisten; }).catch((error) => {
+      captureFrontendError(error, "listen_for_job_progress");
+      setNotice(String(error));
+    });
 
     return () => dispose?.();
   }, []);
@@ -117,6 +125,7 @@ function App() {
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
       setNav("jobs");
     } catch (error) {
+      captureFrontendError(error, "start_clipping_job");
       setNotice(String(error));
     } finally {
       setStarting(false);
@@ -127,6 +136,7 @@ function App() {
     try {
       await invoke("cancel_clipping_job", { jobId: id });
     } catch (error) {
+      captureFrontendError(error, "cancel_clipping_job");
       setNotice(String(error));
     }
   }
@@ -138,6 +148,7 @@ function App() {
       const job = await invoke<JobSnapshot>("retry_clipping_job", { jobId: id });
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
     } catch (error) {
+      captureFrontendError(error, "retry_clipping_job");
       setNotice(String(error));
     } finally {
       setRetryingJobId(null);
@@ -181,6 +192,7 @@ function App() {
       setAccounts(nextAccounts);
       return true;
     } catch (error) {
+      captureFrontendError(error, "connect_publisher_account");
       setNotice(String(error));
       return false;
     } finally {
@@ -196,6 +208,7 @@ function App() {
       setAccounts(nextAccounts);
       changePublisher(platform, false);
     } catch (error) {
+      captureFrontendError(error, "disconnect_publisher_account");
       setNotice(String(error));
     } finally {
       setBusyPlatform(null);

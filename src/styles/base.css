@@ -107,6 +107,48 @@ button:active:not(:disabled) { transform: translateY(1px); }
   background-clip: padding-box;
 }
 
+.fatal-error {
+  display: grid;
+  min-height: 100vh;
+  padding: 32px;
+  place-items: center;
+}
+
+.fatal-error__panel {
+  width: min(100%, 520px);
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+}
+
+.fatal-error__panel h1 {
+  margin: 8px 0 12px;
+  font-size: clamp(1.5rem, 4vw, 2rem);
+}
+
+.fatal-error__panel p { color: var(--text-soft); }
+
+.fatal-error__panel .fatal-error__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font: 500 0.75rem/1.2 "IBM Plex Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fatal-error__panel button {
+  margin-top: 12px;
+  padding: 9px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #1a100d;
+  cursor: pointer;
+  font-weight: 650;
+}
+
 .icon { display: block; flex: 0 0 auto; }
 
 h1,

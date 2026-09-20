@@ -1,9 +1,15 @@
 # ClipFarmer Backend Testing
 
-Run commands from:
+Run library test commands from:
 
 ```text
 /home/mahd/clipfarmer6700/src-tauri/clipfarmer
+```
+
+Run the direct VOD-slice command from the repository root:
+
+```text
+/home/mahd/clipfarmer6700
 ```
 
 ## Prerequisites
@@ -13,11 +19,25 @@ Install the local tools used by the backend:
 - Rust and Cargo
 - `ffmpeg` and `ffprobe`
 - `streamlink`
-- `chat_downloader` for VOD chat downloads
+- `TwitchDownloaderCLI` 1.56.5 or newer for VOD chat downloads
 - Whisper GGML model files
 - Silero VAD GGML model file
 
-The live test uses the native Twitch IRC WebSocket collector and does not use `chat_downloader`.
+The obsolete Python `chat_downloader` 0.2.8 does not work with Twitch's current GraphQL persisted queries. Do not use it for VOD tests. The live test uses the native Twitch IRC WebSocket collector and does not use `TwitchDownloaderCLI`.
+
+Install TwitchDownloaderCLI on Linux x64 without root access:
+
+```bash
+mkdir -p "$HOME/.local/share/clipfarmer/TwitchDownloaderCLI-1.56.5"
+curl -fL -o /tmp/TwitchDownloaderCLI.zip \
+  https://github.com/lay295/TwitchDownloader/releases/download/1.56.5/TwitchDownloaderCLI-1.56.5-Linux-x64.zip
+unzip -q -o /tmp/TwitchDownloaderCLI.zip \
+  -d "$HOME/.local/share/clipfarmer/TwitchDownloaderCLI-1.56.5"
+chmod +x "$HOME/.local/share/clipfarmer/TwitchDownloaderCLI-1.56.5/TwitchDownloaderCLI"
+ln -sfn "$HOME/.local/share/clipfarmer/TwitchDownloaderCLI-1.56.5/TwitchDownloaderCLI" \
+  "$HOME/.local/bin/TwitchDownloaderCLI"
+TwitchDownloaderCLI --version
+```
 
 ## Model Files
 
@@ -36,6 +56,18 @@ curl -L -o models/ggml-silero-v6.2.0.bin \
 The first file is the transcription model. The second is the voice-activity-detection model.
 
 ## Environment Variables
+
+### OpenAI Pipeline Runs
+
+The direct VOD runner reads the OpenAI key from `CLIPFARMER_OPENAI_KEY`:
+
+```bash
+read -rsp 'OpenAI API key: ' CLIPFARMER_OPENAI_KEY
+printf '\n'
+export CLIPFARMER_OPENAI_KEY
+```
+
+Do not put the API key in command history, JSON configuration, source files, or test logs.
 
 ### Twitch API Test
 
@@ -69,7 +101,7 @@ Do not commit or paste the access token or client secret. The client secret is n
 | `CLIPFARMER_TEST_START_MS` | No | Start offset into the VOD in milliseconds. Defaults to `0`. |
 | `CLIPFARMER_TEST_WINDOW_MS` | No | Evidence window length in milliseconds. Defaults to `30000`. |
 | `CLIPFARMER_STREAMLINK` | No | Streamlink executable path. Defaults to `streamlink`. |
-| `CLIPFARMER_CHAT_DOWNLOADER` | No | VOD chat downloader executable path. Defaults to `chat_downloader`. |
+| `CLIPFARMER_CHAT_DOWNLOADER` | No | VOD chat downloader executable path. Defaults to `TwitchDownloaderCLI`. |
 | `CLIPFARMER_FFMPEG` | No | FFmpeg executable path. Defaults to `ffmpeg`. |
 
 ### Live Ingestion Test
@@ -123,6 +155,90 @@ cargo test --lib
 
 Normal tests use deterministic fakes and local fixtures. They do not call Twitch, OpenAI, or Gemini.
 
+## Full OpenAI VOD-Slice Pipeline
+
+From the repository root, run the complete observer, director, editor, critic, rendering, staging, and dry-run publishing pipeline on a bounded VOD interval:
+
+```bash
+cargo run --manifest-path src-tauri/clipfarmer/Cargo.toml \
+  --bin clipfarmer-vod -- \
+  --url 'https://www.twitch.tv/videos/VIDEO_ID' \
+  --start '02:30:50' \
+  --end '02:34:50' \
+  --no-visuals \
+  --data-dir './data' 2>&1 | tee clipfarmer-run.log
+```
+
+The runner accepts `HH:MM:SS`, `MM:SS`, fractional seconds, or bare seconds. The selected interval must be at least five seconds.
+
+The runner uses OpenAI, candidate-audio analysis, chat evidence, and dry-run publishing by default. Available flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--no-visuals` | Do not sample or send JPEG frames; rendering uses `full_frame`. |
+| `--no-audio` | Do not send candidate WAV audio to the hosted audio model. |
+| `--no-chat` | Skip VOD chat evidence entirely. |
+| `--data-dir PATH` | Select the cache, database, staging, and output root. Defaults to `./data`. |
+| `--publish` | Use configured real publishers instead of dry-run publishers. Omit this during evaluation. |
+
+Without `--publish`, an accepted candidate still traverses the publishing boundary but reports `status dry_run`; no remote post is created.
+
+### Expected Decision Output
+
+The terminal distinguishes observer detection, review stages, and the exact final source interval:
+
+```text
+Tracking candidate 78e7499e (02:31:04 → 02:32:02)
+Running director (...) — accepted at 88% confidence
+Running editor (...) — accepted at 91% confidence
+Running critic (...) — accepted at 86% confidence
+Candidate accepted: Example title (02:31:08 → 02:31:54)
+Publishing 02:31:08 → 02:31:54 to youtube — status dry_run
+```
+
+If an optional model-proposed alternative is outside the candidate bounds, it is discarded and reported. The chosen primary cut remains strictly validated:
+
+```text
+Discarded 1 out-of-bounds director alternative(s)
+```
+
+The final summary reports observed windows, reviewed candidates, accepted/rejected candidates, and completed posts. The critic only runs after the observer produces a candidate and the candidate matures.
+
+### GPU Transcription
+
+The default build uses CPU transcription. Enable one Scribble backend at compile time:
+
+```bash
+# NVIDIA CUDA
+cargo run --manifest-path src-tauri/clipfarmer/Cargo.toml \
+  --features cuda --bin clipfarmer-vod -- \
+  --url 'https://www.twitch.tv/videos/VIDEO_ID' \
+  --start '02:30:50' --end '02:34:50' --no-visuals
+
+# Vulkan-capable GPU
+cargo run --manifest-path src-tauri/clipfarmer/Cargo.toml \
+  --features vulkan --bin clipfarmer-vod -- \
+  --url 'https://www.twitch.tv/videos/VIDEO_ID' \
+  --start '02:30:50' --end '02:34:50' --no-visuals
+```
+
+CUDA requires a compatible NVIDIA driver and CUDA toolkit/runtime. GPU features accelerate local Scribble transcription; OpenAI calls remain remote and FFmpeg work is generally CPU-bound.
+
+### Slice Cache Behavior
+
+VOD slice runs download only the selected HLS range plus 120 seconds of pre-roll. Pre-roll supplies decoder/keyframe context. ClipFarmer probes the MPEG-TS start timestamp and translates absolute VOD timestamps into relative FFmpeg seeks.
+
+Artifacts are stored under:
+
+```text
+data/vods/VIDEO_ID/
+  channel.txt
+  source-START_MS-END_MS-preroll.ts
+  source-START_MS-END_MS-preroll.chat.jsonl
+```
+
+TwitchDownloaderCLI downloads only the selected chat interval. Its rich `comments[]` JSON is normalized into timestamped JSONL for the evidence pipeline. Empty chat sidecars are treated as failed cache entries and retried.
+
 ### Twitch API Connectivity Test
 
 This performs a read-only Twitch Helix channel lookup:
@@ -136,7 +252,7 @@ cargo test \
 
 ### Real VOD Ingestion Test
 
-This downloads the selected VOD and its chat, then runs local frame sampling, signal extraction, and Scribble transcription:
+This downloads the selected VOD and its chat with TwitchDownloaderCLI, then runs local frame sampling, signal extraction, and Scribble transcription:
 
 ```bash
 export TWITCH_TEST_VOD_URL='https://www.twitch.tv/videos/VIDEO_ID'
@@ -152,6 +268,47 @@ cargo test \
 ```
 
 Use a public VOD with chat replay available. The VOD test may download the full recording before analyzing the selected window.
+
+### Troubleshooting VOD Slice Runs
+
+#### Repeated `Analyzing VOD slice` Lines
+
+The runtime emits a pulse every two seconds while local transcription, FFmpeg, or a hosted model call is active. This does not by itself indicate a stall. A four-minute interval with the default six-second observer step creates 40 overlapping analysis windows. CPU transcription with the large-turbo model can take roughly one minute per window.
+
+#### Chat Reports Zero Messages
+
+Check the chat sidecar size and message count:
+
+```bash
+ls -lh data/vods/VIDEO_ID/*chat.jsonl
+wc -l data/vods/VIDEO_ID/*chat.jsonl
+```
+
+The old Python Chat Downloader fails with `PersistedQueryNotFound` and must not be used. Verify the maintained tool:
+
+```bash
+TwitchDownloaderCLI --version
+TwitchDownloaderCLI chatdownload \
+  --id VIDEO_ID \
+  --output /tmp/chat.json \
+  --beginning 9050s \
+  --ending 9290s \
+  --collision Overwrite \
+  --banner false
+```
+
+#### FFmpeg Produces No Frames
+
+Inspect the partial TS timeline:
+
+```bash
+ffprobe -v error \
+  -show_entries format=start_time,duration \
+  -of default=noprint_wrappers=1 \
+  data/vods/VIDEO_ID/source-START_MS-END_MS-preroll.ts
+```
+
+Partial Twitch MPEG-TS files commonly begin at a non-zero timestamp. ClipFarmer carries that offset into transcription, signal extraction, frame sampling, candidate-audio extraction, and rendering. Do not replace a `-preroll.ts` artifact with a manually trimmed zero-context TS file.
 
 ### Real Live Ingestion Test
 

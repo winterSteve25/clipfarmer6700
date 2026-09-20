@@ -1566,7 +1566,7 @@ mod twitch_ingestion_tests {
         let streamlink =
             std::env::var("CLIPFARMER_STREAMLINK").unwrap_or_else(|_| "streamlink".to_owned());
         let chat_downloader = std::env::var("CLIPFARMER_CHAT_DOWNLOADER")
-            .unwrap_or_else(|_| "chat_downloader".to_owned());
+            .unwrap_or_else(|_| "TwitchDownloaderCLI".to_owned());
         let ffmpeg = std::env::var("CLIPFARMER_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
         let model_path = PathBuf::from(required("CLIPFARMER_WHISPER_MODEL"));
         let vad_model_path = PathBuf::from(required("CLIPFARMER_VAD_MODEL"));

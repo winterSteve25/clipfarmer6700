@@ -5,7 +5,7 @@ pub mod gemini;
 pub mod openai;
 
 use crate::{
-    domain::{AudioAnnotation, Candidate, VisualSample},
+    domain::{AudioAnnotation, Candidate, EditorialStage, VisualSample},
     manifest::validate_safe_path,
 };
 use anyhow::{Context, Result, ensure};
@@ -76,6 +76,14 @@ pub(crate) fn select_visuals(samples: &[VisualSample], limit: usize) -> Vec<&Vis
         .collect()
 }
 
+pub(crate) fn visual_budget(stage: EditorialStage) -> usize {
+    match stage {
+        EditorialStage::Observer => 4,
+        EditorialStage::Director => 8,
+        EditorialStage::Editor | EditorialStage::Critic => 6,
+    }
+}
+
 pub(crate) fn base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -143,5 +151,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn visual_budgets_preserve_more_context_for_the_director() {
+        assert_eq!(visual_budget(EditorialStage::Observer), 4);
+        assert_eq!(visual_budget(EditorialStage::Director), 8);
+        assert_eq!(visual_budget(EditorialStage::Editor), 6);
+        assert_eq!(visual_budget(EditorialStage::Critic), 6);
     }
 }

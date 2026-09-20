@@ -75,10 +75,10 @@ export function buildBackendConfig(config: ConfigState) {
     models: { provider: config.provider },
     [config.provider]: {
       apiKeyEnv: config.apiKeyEnv,
-      observerModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
-      directorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
-      editorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
-      criticModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-sol",
+      observerModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-luna",
+      directorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-luna",
+      editorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-luna",
+      criticModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-luna",
       audioModel: isGemini ? "gemini-3.7-flash" : "gpt-audio-1.5",
     },
     staging: {

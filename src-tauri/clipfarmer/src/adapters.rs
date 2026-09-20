@@ -674,6 +674,25 @@ pub struct TwitchVodSource {
     pub cache_root: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VodChatDownloader {
+    TwitchDownloaderCli,
+    ChatDownloader,
+}
+
+fn vod_chat_downloader(executable: &Path) -> VodChatDownloader {
+    let name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.contains("chat_downloader") || name.contains("chat-downloader") {
+        VodChatDownloader::ChatDownloader
+    } else {
+        VodChatDownloader::TwitchDownloaderCli
+    }
+}
+
 impl TwitchVodSource {
     pub async fn prepare(
         &self,
@@ -881,59 +900,93 @@ impl TwitchVodSource {
         destination: &Path,
         media_window: Option<(i64, i64)>,
     ) -> Result<()> {
+        let downloader = vod_chat_downloader(&self.chat_downloader);
+        let extension = match downloader {
+            VodChatDownloader::TwitchDownloaderCli => "json",
+            VodChatDownloader::ChatDownloader => "jsonl",
+        };
         let temporary =
-            destination.with_file_name(format!("chat-{}.part.json", uuid::Uuid::new_v4()));
+            destination.with_file_name(format!("chat-{}.part.{extension}", uuid::Uuid::new_v4()));
         let download = ByteProgress::start("Downloading timestamped Twitch chat", &temporary);
         let mut command = tokio::process::Command::new(&self.chat_downloader);
-        command
-            .args(["chatdownload", "--id", twitch_vod_id(url)?, "--output"])
-            .arg(&temporary)
-            .args([
-                "--threads",
-                "2",
-                "--collision",
-                "Overwrite",
-                "--banner",
-                "false",
-            ]);
-        if let Some((start_ms, end_ms)) = media_window {
-            command
-                .args(["--beginning"])
-                .arg(format!("{start_ms}ms"))
-                .args(["--ending"])
-                .arg(format!("{end_ms}ms"));
+        match downloader {
+            VodChatDownloader::TwitchDownloaderCli => {
+                command
+                    .args(["chatdownload", "--id", twitch_vod_id(url)?, "--output"])
+                    .arg(&temporary)
+                    .args([
+                        "--threads",
+                        "2",
+                        "--collision",
+                        "Overwrite",
+                        "--banner",
+                        "false",
+                    ]);
+                if let Some((start_ms, end_ms)) = media_window {
+                    command
+                        .args(["--beginning"])
+                        .arg(format!("{start_ms}ms"))
+                        .args(["--ending"])
+                        .arg(format!("{end_ms}ms"));
+                }
+            }
+            VodChatDownloader::ChatDownloader => {
+                command.arg(url).args(["--output"]).arg(&temporary).args([
+                    "--overwrite",
+                    "true",
+                    "--quiet",
+                ]);
+                if let Some((start_ms, end_ms)) = media_window {
+                    command
+                        .args(["--start_time"])
+                        .arg(seconds(start_ms))
+                        .args(["--end_time"])
+                        .arg(seconds(end_ms));
+                }
+            }
         }
-        let output = command
+        let output = match command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .output()
             .await
-            .context("download Twitch VOD chat")?;
+        {
+            Ok(output) => output,
+            Err(error) => {
+                download.failed("chat downloader could not be started");
+                progress::warning(format!(
+                    "Twitch VOD chat downloader is unavailable; continuing without chat: {error}"
+                ));
+                fs::write(destination, [])?;
+                return Ok(());
+            }
+        };
         if !output.status.success() {
-            download.failed(format!("TwitchDownloaderCLI exited with {}", output.status));
+            download.failed(format!("chat downloader exited with {}", output.status));
             let _ = fs::remove_file(&temporary);
             let diagnostics = format!(
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            if media_window.is_some() {
-                progress::warning(format!(
-                    "bounded chat download failed; continuing without chat: {}",
-                    diagnostics.trim()
-                ));
-                fs::write(destination, [])?;
-                return Ok(());
-            }
-            anyhow::bail!(
-                "TwitchDownloaderCLI could not download Twitch VOD chat: {}",
-                diagnostics
-            );
+            progress::warning(format!(
+                "Twitch VOD chat download failed; continuing without chat: {}",
+                diagnostics.trim()
+            ));
+            fs::write(destination, [])?;
+            return Ok(());
         }
         if temporary.exists() {
             let transferred = fs::metadata(&temporary)?.len();
-            let message_count = normalize_twitch_downloader_chat(&temporary, destination)?;
+            let message_count = match downloader {
+                VodChatDownloader::TwitchDownloaderCli => {
+                    normalize_twitch_downloader_chat(&temporary, destination)?
+                }
+                VodChatDownloader::ChatDownloader => {
+                    normalize_chat_downloader_chat(&temporary, destination)?
+                }
+            };
             let _ = fs::remove_file(&temporary);
             download.done_with_size(transferred, format!("{message_count} messages"));
         } else {
@@ -942,6 +995,40 @@ impl TwitchVodSource {
         }
         Ok(())
     }
+}
+
+fn normalize_chat_downloader_chat(input: &Path, destination: &Path) -> Result<usize> {
+    let raw = fs::read_to_string(input).context("read chat_downloader JSONL")?;
+    let mut normalized = Vec::new();
+    let mut message_count = 0;
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let item: Value = serde_json::from_str(line).context("parse chat_downloader JSONL")?;
+        let Some(at_seconds) = item.get("time_in_seconds").and_then(Value::as_f64) else {
+            continue;
+        };
+        let Some(message) = item.get("message").and_then(Value::as_str) else {
+            continue;
+        };
+        if message.trim().is_empty() {
+            continue;
+        }
+        let author = item
+            .pointer("/author/name")
+            .or_else(|| item.get("author"))
+            .and_then(Value::as_str);
+        serde_json::to_writer(
+            &mut normalized,
+            &serde_json::json!({
+                "time_in_seconds":at_seconds,
+                "message":message,
+                "author":author,
+            }),
+        )?;
+        normalized.push(b'\n');
+        message_count += 1;
+    }
+    fs::write(destination, normalized)?;
+    Ok(message_count)
 }
 
 fn normalize_twitch_downloader_chat(input: &Path, destination: &Path) -> Result<usize> {
@@ -1548,6 +1635,72 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"halfdone");
         assert!(samples.iter().any(|&bytes| bytes > 0 && bytes < 8));
         assert_eq!(samples.last(), Some(&8));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uses_chat_downloader_command_line_and_normalizes_jsonl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "clipfarmer-chat-downloader-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let chat_downloader = root.join("chat_downloader");
+        fs::write(
+            &chat_downloader,
+            "#!/bin/sh\nurl=$1\nshift\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --output) shift; output=$1 ;;\n    --start_time) shift; start=$1 ;;\n    --end_time) shift; end=$1 ;;\n    --overwrite) shift ;;\n    --quiet) ;;\n    *) exit 64 ;;\n  esac\n  shift\ndone\n[ \"$url\" = \"https://www.twitch.tv/videos/123456789\" ] || exit 65\n[ \"$start\" = \"30.000\" ] || exit 66\n[ \"$end\" = \"45.000\" ] || exit 67\nprintf '%s\\n' '{\"time_in_seconds\":31.5,\"message\":\"hello\",\"author\":{\"name\":\"viewer\"}}' > \"$output\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&chat_downloader, fs::Permissions::from_mode(0o755)).unwrap();
+        let destination = root.join("chat.jsonl");
+        TwitchVodSource {
+            streamlink: root.join("unused-streamlink"),
+            chat_downloader,
+            cache_root: root.join("cache"),
+        }
+        .download_chat(
+            "https://www.twitch.tv/videos/123456789",
+            &destination,
+            Some((30_000, 45_000)),
+        )
+        .await
+        .unwrap();
+        let line: Value =
+            serde_json::from_str(fs::read_to_string(&destination).unwrap().trim()).unwrap();
+        assert_eq!(line["time_in_seconds"], 31.5);
+        assert_eq!(line["message"], "hello");
+        assert_eq!(line["author"], "viewer");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vod_chat_failure_does_not_discard_downloaded_media() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("clipfarmer-chat-failure-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let chat_downloader = root.join("chat_downloader");
+        fs::write(
+            &chat_downloader,
+            "#!/bin/sh\necho unavailable >&2\nexit 9\n",
+        )
+        .unwrap();
+        fs::set_permissions(&chat_downloader, fs::Permissions::from_mode(0o755)).unwrap();
+        let destination = root.join("chat.jsonl");
+        TwitchVodSource {
+            streamlink: root.join("unused-streamlink"),
+            chat_downloader,
+            cache_root: root.join("cache"),
+        }
+        .download_chat("https://www.twitch.tv/videos/123456789", &destination, None)
+        .await
+        .unwrap();
+        assert_eq!(fs::metadata(&destination).unwrap().len(), 0);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -239,48 +239,69 @@ impl Service {
                     local_signals: Some(local_signals),
                 },
             );
-            let observer_step = Step::start(format!(
-                "Running observer ({})",
-                self.editorial.model_name(EditorialStage::Observer)
-            ));
-            let observer = self
-                .editorial
-                .decide(EditorialStage::Observer, &window, None, &[], None)
-                .await?;
-            let (observer, observer_repaired) =
-                normalize_decision_bounds(observer, window.start_ms, window.end_ms);
-            if observer_repaired {
-                progress::warning("Observer returned invalid boundaries; normalized the decision");
-            }
-            crate::editorial::validate_decision(&observer, window.start_ms, window.end_ms)?;
-            observer_step.done(format!(
-                "{} at {:.0}% confidence",
-                if observer.accept {
-                    "candidate detected"
-                } else {
-                    "no candidate"
-                },
-                observer.confidence * 100.0
-            ));
             summary.windows_observed += 1;
-            self.record_ring("observer", &session_id, serde_json::to_value(&observer)?)?;
-            if observer.accept
-                && let Some(candidate) = candidate_from_observer(
-                    &session_id,
-                    channel_id,
-                    &source_id,
-                    transcripts.segments(),
-                    &observer,
-                    duration_ms,
-                )
-            {
-                progress::info(format!(
-                    "Tracking candidate {} ({} → {})",
-                    short_id(&candidate.id),
-                    progress::timestamp(candidate.start_ms),
-                    progress::timestamp(candidate.end_ms)
+            if should_run_hosted_observer(
+                window_number,
+                new_segment_count,
+                &window,
+                local_signals,
+                &profile,
+            ) {
+                let observer_step = Step::start(format!(
+                    "Running observer ({})",
+                    self.editorial.model_name(EditorialStage::Observer)
                 ));
-                tracker.observe(candidate);
+                let observer = self
+                    .editorial
+                    .decide(EditorialStage::Observer, &window, None, &[], None)
+                    .await?;
+                let (observer, observer_repaired) =
+                    normalize_decision_bounds(observer, window.start_ms, window.end_ms);
+                if observer_repaired {
+                    progress::warning(
+                        "Observer returned invalid boundaries; normalized the decision",
+                    );
+                }
+                crate::editorial::validate_decision(&observer, window.start_ms, window.end_ms)?;
+                observer_step.done(format!(
+                    "{} at {:.0}% confidence",
+                    if observer.accept {
+                        "candidate detected"
+                    } else {
+                        "no candidate"
+                    },
+                    observer.confidence * 100.0
+                ));
+                self.record_ring("observer", &session_id, serde_json::to_value(&observer)?)?;
+                if observer.accept
+                    && let Some(candidate) = candidate_from_observer(
+                        &session_id,
+                        channel_id,
+                        &source_id,
+                        transcripts.segments(),
+                        &observer,
+                        duration_ms,
+                    )
+                {
+                    progress::info(format!(
+                        "Tracking candidate {} ({} → {})",
+                        short_id(&candidate.id),
+                        progress::timestamp(candidate.start_ms),
+                        progress::timestamp(candidate.end_ms)
+                    ));
+                    tracker.observe(candidate);
+                }
+            } else {
+                progress::info("Skipping hosted observer for an inactive window");
+                self.record_ring(
+                    "observer_skipped",
+                    &session_id,
+                    serde_json::json!({
+                        "start_ms":window.start_ms,
+                        "end_ms":window.end_ms,
+                        "reason":"no new speech, chat, audio spike, or scene change"
+                    }),
+                )?;
             }
             let ready = tracker.mature(cursor);
             self.review_ready(
@@ -550,7 +571,7 @@ impl Service {
         };
         let audio_for_model = self.cfg.models.audio_analysis.then_some(&audio);
         if !confidently_rejected {
-            for stage in [EditorialStage::Editor, EditorialStage::Critic] {
+            for stage in remaining_review_stages(&decisions[0]).iter().copied() {
                 let editorial_step = Step::start(format!(
                     "Running {stage} ({})",
                     self.editorial.model_name(stage)
@@ -592,6 +613,10 @@ impl Service {
                     decision.confidence * 100.0
                 ));
                 decisions.push(decision);
+                if should_finish_review(&decisions) {
+                    progress::info("Skipping critic after a confident editor rejection");
+                    break;
+                }
             }
         }
         let final_decision = decisions.last().cloned().expect("director decision");
@@ -865,6 +890,46 @@ fn evidence_window(
     }
 }
 
+fn should_run_hosted_observer(
+    window_number: i64,
+    new_segment_count: usize,
+    window: &EvidenceWindow,
+    signals: LocalSignals,
+    profile: &ChannelProfile,
+) -> bool {
+    const HEARTBEAT_WINDOWS: i64 = 5;
+    if window_number <= 1 || window_number % HEARTBEAT_WINDOWS == 0 {
+        return true;
+    }
+    if new_segment_count > 0 || !window.chat.is_empty() {
+        return true;
+    }
+    let audio_threshold = if profile.normal_audio_energy > 0.0 {
+        (profile.normal_audio_energy * 0.75).max(0.12)
+    } else {
+        0.12
+    };
+    signals.audio_energy >= audio_threshold || signals.scene_change_rate >= 0.02
+}
+
+fn remaining_review_stages(director: &EditorialDecision) -> &'static [EditorialStage] {
+    let publication_ready = director.accept
+        && director.confidence >= 0.95
+        && !director.title.trim().is_empty()
+        && director.layout.is_some();
+    if publication_ready {
+        &[EditorialStage::Critic]
+    } else {
+        &[EditorialStage::Editor, EditorialStage::Critic]
+    }
+}
+
+fn should_finish_review(decisions: &[EditorialDecision]) -> bool {
+    decisions.last().is_some_and(|decision| {
+        decision.stage == EditorialStage::Editor && !decision.accept && decision.confidence >= 0.9
+    })
+}
+
 fn load_chat_sidecar(input_path: &str, session_id: &str) -> Result<Vec<ChatEvent>> {
     let sidecar = Path::new(input_path).with_extension("chat.jsonl");
     if !sidecar.exists() {
@@ -956,6 +1021,81 @@ mod tests {
 
     fn profile() -> ChannelProfile {
         ChannelProfile::empty("channel")
+    }
+
+    fn editorial_decision(
+        stage: EditorialStage,
+        accept: bool,
+        confidence: f64,
+    ) -> EditorialDecision {
+        EditorialDecision {
+            stage,
+            accept,
+            confidence,
+            rationale: "test".to_owned(),
+            title: "test".to_owned(),
+            start_ms: 0,
+            end_ms: 10_000,
+            hook_text: None,
+            layout: None,
+            alternatives: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inactive_observer_windows_are_skipped_but_heartbeats_run() {
+        let window = EvidenceWindow {
+            session_id: "session".to_owned(),
+            channel_id: "channel".to_owned(),
+            start_ms: 0,
+            end_ms: 8_000,
+            transcripts: Vec::new(),
+            chat: Vec::new(),
+            visuals: Vec::new(),
+            signals: Vec::new(),
+            channel_profile: None,
+        };
+        let quiet = LocalSignals {
+            audio_energy: 0.05,
+            scene_change_rate: 0.0,
+        };
+        assert!(!should_run_hosted_observer(
+            2,
+            0,
+            &window,
+            quiet,
+            &profile()
+        ));
+        assert!(should_run_hosted_observer(5, 0, &window, quiet, &profile()));
+        assert!(should_run_hosted_observer(2, 1, &window, quiet, &profile()));
+    }
+
+    #[test]
+    fn confident_acceptance_keeps_critic_and_skips_editor() {
+        let mut director = editorial_decision(EditorialStage::Director, true, 0.95);
+        director.layout = Some("fit_blur".to_owned());
+        assert_eq!(
+            remaining_review_stages(&director),
+            &[EditorialStage::Critic]
+        );
+    }
+
+    #[test]
+    fn confident_but_incomplete_director_decision_keeps_editor() {
+        let director = editorial_decision(EditorialStage::Director, true, 0.99);
+        assert_eq!(
+            remaining_review_stages(&director),
+            &[EditorialStage::Editor, EditorialStage::Critic]
+        );
+    }
+
+    #[test]
+    fn confident_editor_rejection_finishes_review() {
+        let decisions = vec![
+            editorial_decision(EditorialStage::Director, true, 0.7),
+            editorial_decision(EditorialStage::Editor, false, 0.95),
+        ];
+        assert!(should_finish_review(&decisions));
     }
 
     #[test]

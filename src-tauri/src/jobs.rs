@@ -7,7 +7,8 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
+    io::Read,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -456,15 +457,38 @@ fn bundled_model_paths(app: &AppHandle) -> Result<ModelPaths, Box<dyn std::error
         &paths.tiny_transcription,
         &paths.voice_activity_detection,
     ] {
-        if !path.is_file() {
-            return Err(format!(
-                "bundled ClipFarmer model is missing at {}; check src-tauri/resources/scribble-models",
-                path.display()
-            )
-            .into());
-        }
+        validate_bundled_model(path)?;
     }
     Ok(paths)
+}
+
+fn validate_bundled_model(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.is_file() {
+        return Err(format!(
+            "bundled ClipFarmer model is missing at {}; run `git lfs pull` and restart the app",
+            path.display()
+        )
+        .into());
+    }
+    let mut header = [0_u8; 64];
+    let mut file = fs::File::open(path)?;
+    let bytes_read = file.read(&mut header)?;
+    let header = &header[..bytes_read];
+    if header.starts_with(b"version https://git-lfs.github.com/spec/v1") {
+        return Err(format!(
+            "bundled ClipFarmer model at {} is only a Git LFS pointer; run `git lfs pull` and restart the app",
+            path.display()
+        )
+        .into());
+    }
+    if !header.starts_with(b"lmgg") {
+        return Err(format!(
+            "bundled ClipFarmer model at {} is invalid or incomplete; run `git lfs pull` and restart the app",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_source(source: &JobSource) -> Result<(), String> {
@@ -554,6 +578,38 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_model_validation_rejects_git_lfs_pointers() {
+        let root = std::env::temp_dir().join(format!(
+            "clipfarmer-model-validation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let model = root.join("model.bin");
+        fs::write(
+            &model,
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n",
+        )
+        .unwrap();
+        let error = validate_bundled_model(&model).unwrap_err().to_string();
+        assert!(error.contains("Git LFS pointer"));
+        assert!(error.contains("git lfs pull"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_model_validation_accepts_ggml_header() {
+        let root = std::env::temp_dir().join(format!(
+            "clipfarmer-model-validation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let model = root.join("model.bin");
+        fs::write(&model, b"lmgg-model-data").unwrap();
+        validate_bundled_model(&model).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn validates_channel_and_vod_sources() {

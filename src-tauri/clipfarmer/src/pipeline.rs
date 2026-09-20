@@ -491,6 +491,20 @@ impl Service {
                     audio_for_model,
                 )
                 .await?;
+            let original_cut = (decision.start_ms, decision.end_ms);
+            if crate::editorial::clamp_primary_cut(
+                &mut decision,
+                candidate.start_ms,
+                candidate.end_ms,
+            ) {
+                progress::warning(format!(
+                    "Clamped {stage} cut {} → {} to candidate bounds {} → {}",
+                    progress::timestamp(original_cut.0),
+                    progress::timestamp(original_cut.1),
+                    progress::timestamp(decision.start_ms),
+                    progress::timestamp(decision.end_ms)
+                ));
+            }
             let discarded = crate::editorial::discard_invalid_alternatives(
                 &mut decision,
                 candidate.start_ms,

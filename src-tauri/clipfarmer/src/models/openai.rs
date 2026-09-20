@@ -8,7 +8,7 @@ use crate::{
     domain::{AudioAnnotation, Candidate, EditorialDecision, EditorialStage, EvidenceWindow},
     editorial::{
         CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, decision_schema,
-        evidence_payload, role_instructions,
+        evidence_payload, normalize_decision_stage, role_instructions,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -79,7 +79,7 @@ impl EditorialModel for OpenAiEditorial {
                 "type":"json_schema",
                 "name":"clipfarmer_editorial_decision",
                 "strict":true,
-                "schema":decision_schema()
+                "schema":decision_schema(stage)
             }},
             "prompt_cache_key":format!("clipfarmer:{}:{}", evidence.channel_id, stage)
         });
@@ -92,12 +92,13 @@ impl EditorialModel for OpenAiEditorial {
         )
         .await?;
         let text = find_output_text(&response).context("Responses API returned no output_text")?;
-        let decision: EditorialDecision =
+        let mut decision: EditorialDecision =
             serde_json::from_str(text).context("parse structured editorial decision")?;
-        ensure!(
-            decision.stage == stage,
-            "model returned the wrong editorial stage"
-        );
+        if let Some(returned) = normalize_decision_stage(&mut decision, stage) {
+            crate::progress::warning(format!(
+                "OpenAI returned {returned} metadata for the {stage} call; using {stage}"
+            ));
+        }
         Ok(decision)
     }
 }

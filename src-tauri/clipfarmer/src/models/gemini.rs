@@ -8,7 +8,7 @@ use crate::{
     domain::{AudioAnnotation, Candidate, EditorialDecision, EditorialStage, EvidenceWindow},
     editorial::{
         CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, decision_schema,
-        evidence_payload, role_instructions,
+        evidence_payload, normalize_decision_stage, role_instructions,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -80,17 +80,18 @@ impl EditorialModel for GeminiEditorial {
             "response_format":{
                 "type":"text",
                 "mime_type":"application/json",
-                "schema":decision_schema()
+                "schema":decision_schema(stage)
             },
         });
         let response = create_interaction(&self.api_key, &payload).await?;
         let text = find_output_text(&response).context("Gemini returned no model output text")?;
-        let decision: EditorialDecision =
+        let mut decision: EditorialDecision =
             serde_json::from_str(&text).context("parse Gemini editorial decision")?;
-        ensure!(
-            decision.stage == stage,
-            "model returned the wrong editorial stage"
-        );
+        if let Some(returned) = normalize_decision_stage(&mut decision, stage) {
+            crate::progress::warning(format!(
+                "Gemini returned {returned} metadata for the {stage} call; using {stage}"
+            ));
+        }
         Ok(decision)
     }
 }

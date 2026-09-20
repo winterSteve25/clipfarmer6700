@@ -83,6 +83,7 @@ where
                 .model
                 .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
                 .await?;
+            clamp_primary_cut(&mut decision, candidate.start_ms, candidate.end_ms);
             discard_invalid_alternatives(&mut decision, candidate.start_ms, candidate.end_ms);
             validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
             decisions.push(decision);
@@ -149,19 +150,38 @@ pub fn discard_invalid_alternatives(
     original_len - decision.alternatives.len()
 }
 
+pub fn clamp_primary_cut(decision: &mut EditorialDecision, min_ms: i64, max_ms: i64) -> bool {
+    let original = (decision.start_ms, decision.end_ms);
+    decision.start_ms = decision.start_ms.clamp(min_ms, max_ms);
+    decision.end_ms = decision.end_ms.clamp(min_ms, max_ms);
+    original != (decision.start_ms, decision.end_ms)
+}
+
+pub fn normalize_decision_stage(
+    decision: &mut EditorialDecision,
+    expected: EditorialStage,
+) -> Option<EditorialStage> {
+    if decision.stage == expected {
+        return None;
+    }
+    let returned = decision.stage;
+    decision.stage = expected;
+    Some(returned)
+}
+
 pub fn role_instructions(stage: EditorialStage) -> &'static str {
     match stage {
         EditorialStage::Observer => {
             "Track developing standalone moments. Low-cost signals only change evidence density; decide from the supplied transcript, visual evidence when present, chat, and channel context. Accept means a coherent candidate is developing, not that it should publish."
         }
         EditorialStage::Director => {
-            "Identify setup, escalation, payoff, and reaction. Prefer standalone stories with an immediate hook. Propose the shortest complete 5-60 second source interval."
+            "Identify setup, escalation, payoff, and reaction. Prefer standalone stories with an immediate hook. Propose the shortest complete 5-60 second source interval. Every proposed boundary and alternative must remain within the supplied candidate start_ms and end_ms."
         }
         EditorialStage::Editor => {
-            "Compare the preceding proposal against plausible earlier and later boundaries. Remove dead air without losing comprehension. Choose one layout and truthful optional hook text."
+            "Compare the preceding proposal against plausible earlier and later boundaries within the supplied candidate start_ms and end_ms. Remove dead air without losing comprehension. Choose one layout and truthful optional hook text."
         }
         EditorialStage::Critic => {
-            "Independently try to reject this clip for weak context, a slow opening, dead tail, duplicate/repetitive content, misleading framing, privacy, safety, or platform-policy risk. Accept only if it survives."
+            "Independently try to reject this clip for weak context, a slow opening, dead tail, duplicate/repetitive content, misleading framing, privacy, safety, or platform-policy risk. Keep all boundaries within the supplied candidate start_ms and end_ms. Accept only if it survives."
         }
     }
 }
@@ -187,12 +207,13 @@ pub fn evidence_payload(
     })?)
 }
 
-pub fn decision_schema() -> serde_json::Value {
+pub fn decision_schema(stage: EditorialStage) -> serde_json::Value {
+    let stage = stage.to_string();
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "stage": {"type":"string", "enum":["observer","director","editor","critic"]},
+            "stage": {"type":"string", "enum":[stage]},
             "accept": {"type":"boolean"},
             "confidence": {"type":"number", "minimum":0, "maximum":1},
             "rationale": {"type":"string"},
@@ -324,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_alternatives_are_discarded_without_relaxing_the_primary_cut() {
+    fn invalid_alternatives_and_overlapping_primary_cuts_are_normalized() {
         let mut decision = EditorialDecision {
             stage: EditorialStage::Director,
             accept: true,
@@ -363,5 +384,44 @@ mod tests {
 
         decision.start_ms = 9_000;
         assert!(validate_decision(&decision, 10_000, 68_000).is_err());
+        assert!(clamp_primary_cut(&mut decision, 10_000, 68_000));
+        assert_eq!((decision.start_ms, decision.end_ms), (10_000, 68_000));
+        validate_decision(&decision, 10_000, 68_000).unwrap();
+
+        decision.start_ms = 70_000;
+        decision.end_ms = 75_000;
+        assert!(clamp_primary_cut(&mut decision, 10_000, 68_000));
+        assert!(validate_decision(&decision, 10_000, 68_000).is_err());
+    }
+
+    #[test]
+    fn decision_stage_is_constrained_and_normalized_to_the_invoked_stage() {
+        let schema = decision_schema(EditorialStage::Editor);
+        assert_eq!(
+            schema.pointer("/properties/stage/enum").unwrap(),
+            &serde_json::json!(["editor"])
+        );
+
+        let mut decision = EditorialDecision {
+            stage: EditorialStage::Director,
+            accept: true,
+            confidence: 0.8,
+            rationale: "valid decision with stale stage metadata".to_owned(),
+            title: "Candidate".to_owned(),
+            start_ms: 10_000,
+            end_ms: 20_000,
+            hook_text: None,
+            layout: None,
+            alternatives: Vec::new(),
+        };
+        assert_eq!(
+            normalize_decision_stage(&mut decision, EditorialStage::Editor),
+            Some(EditorialStage::Director)
+        );
+        assert_eq!(decision.stage, EditorialStage::Editor);
+        assert_eq!(
+            normalize_decision_stage(&mut decision, EditorialStage::Editor),
+            None
+        );
     }
 }

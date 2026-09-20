@@ -316,6 +316,52 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_model_call_at(
+        db_path: &Path,
+        session_id: Option<&str>,
+        candidate_id: Option<&str>,
+        stage: &str,
+        model: &str,
+        request_hash: &str,
+        response: &serde_json::Value,
+        latency_ms: u64,
+        estimated_cost_usd: Option<f64>,
+    ) -> Result<()> {
+        let conn = Connection::open(db_path).context("open SQLite store for model usage")?;
+        conn.execute(
+            "INSERT INTO model_calls(
+                id,session_id,candidate_id,stage,model,request_hash,response,latency_ms,estimated_cost_usd
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(stage,model,request_hash) DO UPDATE SET
+                response=excluded.response,
+                latency_ms=excluded.latency_ms,
+                estimated_cost_usd=excluded.estimated_cost_usd",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                session_id,
+                candidate_id,
+                stage,
+                model,
+                request_hash,
+                serde_json::to_string(response)?,
+                latency_ms.min(i64::MAX as u64) as i64,
+                estimated_cost_usd,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn estimated_model_cost_usd(&self, session_id: &str) -> Result<Option<f64>> {
+        self.conn
+            .query_row(
+                "SELECT SUM(estimated_cost_usd) FROM model_calls WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .context("sum estimated model cost")
+    }
+
     pub fn record_manifest(&self, manifest: &EditManifest) -> Result<()> {
         self.conn.execute(
             "INSERT INTO manifests(candidate_id,version,manifest) VALUES(?1,?2,?3)

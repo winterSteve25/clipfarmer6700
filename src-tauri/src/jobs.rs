@@ -45,6 +45,9 @@ pub struct JobSnapshot {
 struct JobEntry {
     snapshot: JobSnapshot,
     cancellation: CancellationHandle,
+    config: Config,
+    deterministic_models: bool,
+    scan_start_ms: i64,
 }
 
 #[derive(Clone)]
@@ -114,10 +117,40 @@ impl JobManager {
                 JobEntry {
                     snapshot: snapshot.clone(),
                     cancellation,
+                    config: config.clone(),
+                    deterministic_models,
+                    scan_start_ms: 0,
                 },
             );
         emit_snapshot(&app, &snapshot);
+        self.spawn_worker(
+            app,
+            id,
+            source,
+            config,
+            deterministic_models,
+            job_root,
+            receiver,
+            0,
+            RunSummaryDto::default(),
+        )?;
 
+        Ok(snapshot)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_worker(
+        &self,
+        app: AppHandle,
+        id: String,
+        source: JobSource,
+        config: Config,
+        deterministic_models: bool,
+        job_root: PathBuf,
+        receiver: clipfarmer::Cancellation,
+        resume_from_ms: i64,
+        base_summary: RunSummaryDto,
+    ) -> Result<(), String> {
         let manager = self.clone();
         let model_paths = self.model_paths.clone();
         std::thread::Builder::new()
@@ -127,19 +160,29 @@ impl JobManager {
                     if job.status == JobStatus::Queued {
                         job.status = JobStatus::Running;
                         job.progress.phase = "starting".to_owned();
-                        job.progress.message = "Initializing ClipFarmer".to_owned();
+                        job.progress.message = if resume_from_ms > 0 {
+                            format!("Resuming near {} seconds", resume_from_ms / 1_000)
+                        } else {
+                            "Initializing ClipFarmer".to_owned()
+                        };
                         record_progress(job);
                     }
                 });
                 let event_manager = manager.clone();
                 let event_app = app.clone();
                 let event_id = id.clone();
+                let progress_base = base_summary.clone();
                 let runner = LibraryRunner::load(
                     config,
                     job_root,
                     model_paths,
                     deterministic_models,
-                    move |progress| {
+                    move |mut progress| {
+                        if let Some(summary) = progress.summary.as_mut() {
+                            add_summary_dto(summary, &progress_base);
+                        } else {
+                            progress.summary = Some(progress_base.clone());
+                        }
                         event_manager.update(&event_app, &event_id, |job| {
                             job.progress = progress;
                             record_progress(job);
@@ -151,13 +194,15 @@ impl JobManager {
                         .enable_all()
                         .build()
                         .map_err(anyhow::Error::from)?;
-                    runtime.block_on(runner.run(source, receiver))
+                    runtime.block_on(runner.run(source, receiver, resume_from_ms))
                 });
                 match result {
                     Ok(result) => manager.update(&app, &id, |job| {
+                        let mut summary = RunSummaryDto::from(&result.summary);
+                        add_summary_dto(&mut summary, &base_summary);
                         job.status = JobStatus::Completed;
                         job.channel = Some(result.channel);
-                        job.summary = Some(RunSummaryDto::from(&result.summary));
+                        job.summary = Some(summary);
                         job.progress.phase = "completed".to_owned();
                         job.progress.message = "Clipping job completed".to_owned();
                         job.progress.summary = job.summary.clone();
@@ -182,8 +227,7 @@ impl JobManager {
                 }
             })
             .map_err(|error| format!("start clipping worker: {error}"))?;
-
-        Ok(snapshot)
+        Ok(())
     }
 
     fn update(&self, app: &AppHandle, id: &str, change: impl FnOnce(&mut JobSnapshot)) {
@@ -219,6 +263,88 @@ impl JobManager {
             entry.snapshot.clone()
         };
         emit_snapshot(app, &snapshot);
+        Ok(snapshot)
+    }
+
+    fn retry(&self, app: AppHandle, id: &str) -> Result<JobSnapshot, String> {
+        let (
+            snapshot,
+            source,
+            config,
+            deterministic_models,
+            receiver,
+            resume_from_ms,
+            base_summary,
+        ) = {
+            let mut jobs = self
+                .jobs
+                .lock()
+                .map_err(|_| "job state is unavailable".to_owned())?;
+            let entry = jobs
+                .get_mut(id)
+                .ok_or_else(|| format!("unknown clipping job {id}"))?;
+            if !matches!(
+                entry.snapshot.status,
+                JobStatus::Failed | JobStatus::Cancelled
+            ) {
+                return Err("only failed or cancelled jobs can be resumed".to_owned());
+            }
+            if !matches!(&entry.snapshot.source, JobSource::Vod { .. }) {
+                return Err(
+                    "live channel captures cannot be resumed; retry is available for VOD jobs"
+                        .to_owned(),
+                );
+            }
+            let base_summary = entry
+                .snapshot
+                .summary
+                .clone()
+                .or_else(|| entry.snapshot.progress.summary.clone())
+                .unwrap_or_default();
+            let resume_from_ms =
+                resume_start_ms(&entry.snapshot.progress, &entry.config, entry.scan_start_ms);
+            let (cancellation, receiver) = CancellationHandle::new();
+            entry.cancellation = cancellation;
+            entry.scan_start_ms = resume_from_ms;
+            entry.snapshot.status = JobStatus::Queued;
+            entry.snapshot.error = None;
+            entry.snapshot.finished_at_ms = None;
+            entry.snapshot.progress = JobProgress {
+                phase: "queued".to_owned(),
+                message: format!(
+                    "Queued to resume near {} seconds using cached media",
+                    resume_from_ms / 1_000
+                ),
+                elapsed_ms: 0,
+                captured_ms: entry.snapshot.progress.captured_ms,
+                completed_units: None,
+                total_units: None,
+                transferred_bytes: None,
+                summary: Some(base_summary.clone()),
+            };
+            record_progress(&mut entry.snapshot);
+            (
+                entry.snapshot.clone(),
+                entry.snapshot.source.clone(),
+                entry.config.clone(),
+                entry.deterministic_models,
+                receiver,
+                resume_from_ms,
+                base_summary,
+            )
+        };
+        emit_snapshot(&app, &snapshot);
+        self.spawn_worker(
+            app,
+            id.to_owned(),
+            source,
+            config,
+            deterministic_models,
+            self.jobs_root.join(id),
+            receiver,
+            resume_from_ms,
+            base_summary,
+        )?;
         Ok(snapshot)
     }
 
@@ -283,6 +409,15 @@ pub fn cancel_clipping_job(
     job_id: String,
 ) -> Result<JobSnapshot, String> {
     state.cancel(&app, &job_id)
+}
+
+#[tauri::command]
+pub fn retry_clipping_job(
+    app: AppHandle,
+    state: State<'_, JobManager>,
+    job_id: String,
+) -> Result<JobSnapshot, String> {
+    state.retry(app, &job_id)
 }
 
 #[tauri::command]
@@ -371,6 +506,30 @@ fn record_progress(job: &mut JobSnapshot) {
     }
 }
 
+fn resume_start_ms(progress: &JobProgress, config: &Config, scan_start_ms: i64) -> i64 {
+    let completed = progress.completed_units.unwrap_or_default() as i64;
+    let step_ms = config.worker.observer_step_seconds as i64 * 1_000;
+    let overlap_ms = (config.worker.observer_window_seconds
+        + config.worker.maturation_delay_seconds) as i64
+        * 1_000;
+    scan_start_ms
+        .saturating_add(completed.saturating_mul(step_ms).saturating_sub(overlap_ms))
+        .max(0)
+}
+
+fn add_summary_dto(total: &mut RunSummaryDto, additional: &RunSummaryDto) {
+    total.windows_observed += additional.windows_observed;
+    total.candidates_reviewed += additional.candidates_reviewed;
+    total.candidates_accepted += additional.candidates_accepted;
+    total.candidates_rejected += additional.candidates_rejected;
+    total.posts_completed += additional.posts_completed;
+    total.publish_failures += additional.publish_failures;
+    if let Some(cost) = additional.estimated_api_cost_usd {
+        total.estimated_api_cost_usd =
+            Some(total.estimated_api_cost_usd.unwrap_or_default() + cost);
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -401,5 +560,44 @@ mod tests {
             url: "https://example.com/123".into()
         })
         .is_err());
+    }
+
+    #[test]
+    fn resume_rewinds_only_context_from_last_completed_window() {
+        let config = Config::default();
+        let progress = JobProgress {
+            phase: "failed".into(),
+            message: String::new(),
+            elapsed_ms: 0,
+            captured_ms: Some(120_000),
+            completed_units: Some(10),
+            total_units: Some(20),
+            transferred_bytes: None,
+            summary: None,
+        };
+
+        assert_eq!(resume_start_ms(&progress, &config, 0), 28_000);
+        assert_eq!(resume_start_ms(&progress, &config, 28_000), 56_000);
+    }
+
+    #[test]
+    fn resumed_summary_preserves_prior_work_and_cost() {
+        let mut resumed = RunSummaryDto {
+            windows_observed: 2,
+            estimated_api_cost_usd: Some(0.25),
+            ..RunSummaryDto::default()
+        };
+        let previous = RunSummaryDto {
+            windows_observed: 10,
+            candidates_accepted: 1,
+            estimated_api_cost_usd: Some(1.5),
+            ..RunSummaryDto::default()
+        };
+
+        add_summary_dto(&mut resumed, &previous);
+
+        assert_eq!(resumed.windows_observed, 12);
+        assert_eq!(resumed.candidates_accepted, 1);
+        assert_eq!(resumed.estimated_api_cost_usd, Some(1.75));
     }
 }

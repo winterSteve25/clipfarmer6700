@@ -64,6 +64,7 @@
 .job-timeline time { color: #5e5865; font: 12px "DM Mono", monospace; }
 .job-actions { display: flex; justify-content: flex-end; padding-top: 13.2px; }
 .job-actions .danger { padding: 7.7px 9.9px; border: 1.1px solid rgba(240,106,125,.25); border-radius: 6.6px; background: rgba(240,106,125,.05); }
+.job-actions .retry { display: inline-flex; align-items: center; gap: 6.6px; padding: 7.7px 9.9px; border: 1.1px solid rgba(139,92,246,.35); border-radius: 6.6px; color: #b99be8; background: rgba(139,92,246,.08); }
 
 .empty-state { min-height: 352px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .empty-state > span { width: 59.4px; height: 59.4px; display: grid; place-items: center; border-radius: 16.5px; color: #795db6; background: rgba(139, 92, 246, .09); }

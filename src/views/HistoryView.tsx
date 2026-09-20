@@ -57,6 +57,11 @@ function formatBytes(bytes: number) {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
 }
 
+function formatCost(cost: number) {
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
 function sourceLabel(job: JobSnapshot) {
   if (job.source.type === "channel") {
     return `twitch.tv/${job.source.channel ?? job.channel ?? "unknown"}`;
@@ -78,7 +83,7 @@ function SummaryPill({ label, value, tone }: { label: string; value: number; ton
   return <div className={`summary-pill ${tone ?? ""}`}><strong>{value}</strong><span>{label}</span></div>;
 }
 
-function Metric({ label, value, tone }: { label: string; value: number; tone?: "good" | "bad" }) {
+function Metric({ label, value, tone }: { label: string; value: number | string; tone?: "good" | "bad" }) {
   return <div className={`job-metric ${tone ?? ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
@@ -109,7 +114,7 @@ function ActivityTimeline({ events }: { events: JobProgress[] }) {
   </ol>;
 }
 
-function JobCard({ job, now, onCancel }: { job: JobSnapshot; now: number; onCancel: (id: string) => void }) {
+function JobCard({ job, now, retrying, onCancel, onRetry }: { job: JobSnapshot; now: number; retrying: boolean; onCancel: (id: string) => void; onRetry: (id: string) => void }) {
   const summary = latestSummary(job);
   const active = ACTIVE_STATUSES.has(job.status);
   const runtime = job.finishedAtMs
@@ -151,18 +156,22 @@ function JobCard({ job, now, onCancel }: { job: JobSnapshot; now: number; onCanc
           <Metric label="Rejected" value={summary?.candidatesRejected ?? 0}/>
           <Metric label="Posts completed" value={summary?.postsCompleted ?? 0} tone="good"/>
           <Metric label="Publish failures" value={summary?.publishFailures ?? 0} tone={(summary?.publishFailures ?? 0) > 0 ? "bad" : undefined}/>
+          {summary?.estimatedApiCostUsd != null && <Metric label="Estimated API cost" value={formatCost(summary.estimatedApiCostUsd)}/>}
         </div>
       </section>
       <section className="job-activity">
         <span className="detail-label">Activity trace</span>
         <ActivityTimeline events={history}/>
       </section>
-      {active && <div className="job-actions"><button className="text-button danger" type="button" disabled={job.status === "cancelling"} onClick={() => onCancel(job.id)}>{job.status === "cancelling" ? "Stopping…" : "Stop run"}</button></div>}
+      {(active || ((job.status === "failed" || job.status === "cancelled") && job.source.type === "vod")) && <div className="job-actions">
+        {active && <button className="text-button danger" type="button" disabled={job.status === "cancelling"} onClick={() => onCancel(job.id)}>{job.status === "cancelling" ? "Stopping…" : "Stop run"}</button>}
+        {!active && job.source.type === "vod" && <button className="text-button retry" type="button" disabled={retrying} onClick={() => onRetry(job.id)}><Icon name="refresh" size={14}/>{retrying ? "Resuming…" : "Resume from checkpoint"}</button>}
+      </div>}
     </div>
   </details>;
 }
 
-export function HistoryView({ jobs, onCancel, onNewRun }: { jobs: JobSnapshot[]; onCancel: (id: string) => void; onNewRun: () => void }) {
+export function HistoryView({ jobs, retryingJobId, onCancel, onRetry, onNewRun }: { jobs: JobSnapshot[]; retryingJobId: string | null; onCancel: (id: string) => void; onRetry: (id: string) => void; onNewRun: () => void }) {
   const hasActiveJobs = jobs.some((job) => ACTIVE_STATUSES.has(job.status));
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -178,7 +187,7 @@ export function HistoryView({ jobs, onCancel, onNewRun }: { jobs: JobSnapshot[];
     <div className="history-summary"><SummaryPill label="Runs" value={jobs.length}/><SummaryPill label="Approved" value={accepted} tone="good"/><SummaryPill label="Rejected" value={rejected}/><SummaryPill label="Failed runs" value={failed} tone={failed ? "bad" : undefined}/></div>
     <div className="history-card">
       <div className="history-card-head"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Clipping runs</h2></div><button className="primary-small" onClick={onNewRun}><Icon name="plus" size={15}/>New run</button></div>
-      {jobs.length ? <div className="job-list">{jobs.map((job) => <JobCard key={job.id} job={job} now={now} onCancel={onCancel}/>)}</div> : <div className="empty-state"><span><Icon name="film" size={28}/></span><h3>No runs yet</h3><p>Start a live channel or VOD run to see progress, diagnostics, and result totals here.</p><button onClick={onNewRun}>Configure first run</button></div>}
+      {jobs.length ? <div className="job-list">{jobs.map((job) => <JobCard key={job.id} job={job} now={now} retrying={retryingJobId === job.id} onCancel={onCancel} onRetry={onRetry}/>)}</div> : <div className="empty-state"><span><Icon name="film" size={28}/></span><h3>No runs yet</h3><p>Start a live channel or VOD run to see progress, diagnostics, and result totals here.</p><button onClick={onNewRun}>Configure first run</button></div>}
     </div>
   </section>;
 }

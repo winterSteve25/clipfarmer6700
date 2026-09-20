@@ -660,7 +660,8 @@ impl TwitchVodSource {
         url: &str,
         channel_override: Option<&str>,
     ) -> Result<PreparedTwitchVod> {
-        self.prepare_with_progress(url, channel_override, |_| {}).await
+        self.prepare_with_progress(url, channel_override, |_| {})
+            .await
     }
 
     pub async fn prepare_with_progress(
@@ -1201,7 +1202,8 @@ mod tests {
     async fn reports_vod_download_byte_progress() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = std::env::temp_dir().join(format!("clipfarmer-progress-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("clipfarmer-progress-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let streamlink = root.join("streamlink");
         fs::write(
@@ -1218,9 +1220,13 @@ mod tests {
         let destination = root.join("source.ts");
         let mut samples = Vec::new();
         source
-            .download_media("https://www.twitch.tv/videos/123456789", &destination, &mut |bytes| {
-                samples.push(bytes);
-            })
+            .download_media(
+                "https://www.twitch.tv/videos/123456789",
+                &destination,
+                &mut |bytes| {
+                    samples.push(bytes);
+                },
+            )
             .await
             .unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"halfdone");

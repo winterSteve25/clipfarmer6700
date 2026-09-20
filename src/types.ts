@@ -11,6 +11,7 @@ export type RunSummary = {
   candidatesRejected: number;
   postsCompleted: number;
   publishFailures: number;
+  estimatedApiCostUsd?: number | null;
 };
 
 export type JobProgress = {

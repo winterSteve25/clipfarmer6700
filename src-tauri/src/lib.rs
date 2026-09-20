@@ -18,6 +18,7 @@ pub fn run() {
             jobs::start_channel_clipping_job,
             jobs::start_vod_clipping_job,
             jobs::cancel_clipping_job,
+            jobs::retry_clipping_job,
             jobs::get_clipping_job,
             jobs::list_clipping_jobs,
         ])

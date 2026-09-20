@@ -56,6 +56,7 @@ pub struct RunSummaryDto {
     pub candidates_rejected: usize,
     pub posts_completed: usize,
     pub publish_failures: usize,
+    pub estimated_api_cost_usd: Option<f64>,
 }
 
 impl From<&RunSummary> for RunSummaryDto {
@@ -67,6 +68,7 @@ impl From<&RunSummary> for RunSummaryDto {
             candidates_rejected: value.candidates_rejected,
             posts_completed: value.posts_completed,
             publish_failures: value.publish_failures,
+            estimated_api_cost_usd: value.estimated_api_cost_usd,
         }
     }
 }
@@ -158,14 +160,20 @@ impl LibraryRunner {
         &self,
         source: JobSource,
         mut cancellation: Cancellation,
+        resume_from_ms: i64,
     ) -> Result<RunResult> {
         match source {
             JobSource::Channel { channel } => self.run_live(&channel, &mut cancellation).await,
-            JobSource::Vod { url } => self.run_vod(&url, &mut cancellation).await,
+            JobSource::Vod { url } => self.run_vod(&url, &mut cancellation, resume_from_ms).await,
         }
     }
 
-    async fn run_vod(&self, url: &str, cancellation: &mut Cancellation) -> Result<RunResult> {
+    async fn run_vod(
+        &self,
+        url: &str,
+        cancellation: &mut Cancellation,
+        resume_from_ms: i64,
+    ) -> Result<RunResult> {
         self.report(
             "preparing_vod",
             "Resolving and downloading the Twitch VOD",
@@ -198,7 +206,14 @@ impl LibraryRunner {
         let service = self.build_service()?;
         self.report(
             "analyzing",
-            "Analyzing the downloaded VOD",
+            if resume_from_ms > 0 {
+                format!(
+                    "Resuming VOD analysis near {} seconds",
+                    resume_from_ms / 1_000
+                )
+            } else {
+                "Analyzing the downloaded VOD".to_owned()
+            },
             Some(duration),
             None,
         );
@@ -206,7 +221,7 @@ impl LibraryRunner {
             &channel,
             &input,
             duration,
-            0,
+            resume_from_ms.min(duration).max(0),
             |completed, total, summary| {
                 self.report_progress(
                     "analyzing",
@@ -413,7 +428,10 @@ impl LibraryRunner {
         let cfg = &self.config;
         self.report(
             "loading_transcription",
-            format!("Loading {:?} transcription model", cfg.scribble.model_variant),
+            format!(
+                "Loading {:?} transcription model",
+                cfg.scribble.model_variant
+            ),
             None,
             None,
         );
@@ -455,12 +473,14 @@ impl LibraryRunner {
                             director_model: cfg.openai.director_model.clone(),
                             editor_model: cfg.openai.editor_model.clone(),
                             critic_model: cfg.openai.critic_model.clone(),
+                            db_path: cfg.db_path(),
                         }),
                         Arc::new(OpenAiAudioAnalyzer {
                             api_key,
                             model: cfg.openai.audio_model.clone(),
                             ffmpeg: cfg.media.ffmpeg_path.clone(),
                             work_dir: cfg.data_dir.join("audio-analysis/openai"),
+                            db_path: cfg.db_path(),
                         }),
                     )
                 }
@@ -561,6 +581,10 @@ fn add_summary(total: &mut RunSummary, pass: &RunSummary) {
     total.candidates_rejected += pass.candidates_rejected;
     total.posts_completed += pass.posts_completed;
     total.publish_failures += pass.publish_failures;
+    if let Some(cost) = pass.estimated_api_cost_usd {
+        total.estimated_api_cost_usd =
+            Some(total.estimated_api_cost_usd.unwrap_or_default() + cost);
+    }
 }
 
 async fn probe_duration_ms(config: &Config, input: &str) -> Result<i64> {

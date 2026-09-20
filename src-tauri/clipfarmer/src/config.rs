@@ -128,7 +128,7 @@ fn default_chat_downloader() -> PathBuf {
     PathBuf::from("chat_downloader")
 }
 fn default_frame_interval() -> u64 {
-    1
+    2
 }
 
 impl Default for MediaConfig {
@@ -220,9 +220,9 @@ pub struct OpenAiConfig {
     pub api_key_env: String,
     #[serde(default = "default_observer_model")]
     pub observer_model: String,
-    #[serde(default = "default_sol_model")]
+    #[serde(default = "default_observer_model")]
     pub director_model: String,
-    #[serde(default = "default_sol_model")]
+    #[serde(default = "default_observer_model")]
     pub editor_model: String,
     #[serde(default = "default_sol_model")]
     pub critic_model: String,
@@ -248,8 +248,8 @@ impl Default for OpenAiConfig {
         Self {
             api_key_env: default_api_key_env(),
             observer_model: default_observer_model(),
-            director_model: default_sol_model(),
-            editor_model: default_sol_model(),
+            director_model: default_observer_model(),
+            editor_model: default_observer_model(),
             critic_model: default_sol_model(),
             audio_model: default_audio_model(),
         }
@@ -441,14 +441,13 @@ impl Config {
                     "OpenAI observer model must be gpt-5.6-terra for this architecture"
                 );
                 ensure!(
-                    [
-                        &self.openai.director_model,
-                        &self.openai.editor_model,
-                        &self.openai.critic_model
-                    ]
-                    .iter()
-                    .all(|model| model.as_str() == "gpt-5.6-sol"),
-                    "OpenAI director, editor, and critic must use gpt-5.6-sol"
+                    self.openai.director_model == "gpt-5.6-terra"
+                        && self.openai.editor_model == "gpt-5.6-terra",
+                    "OpenAI director and editor models must use gpt-5.6-terra"
+                );
+                ensure!(
+                    self.openai.critic_model == "gpt-5.6-sol",
+                    "OpenAI critic model must use gpt-5.6-sol"
                 );
                 ensure!(
                     self.openai.audio_model == "gpt-audio-1.5",

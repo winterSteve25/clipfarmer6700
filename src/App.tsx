@@ -26,6 +26,7 @@ function App() {
   const [openSections, setOpenSections] = useState(DEFAULT_OPEN_SECTIONS);
   const [jobs, setJobs] = useState<JobSnapshot[]>([]);
   const [starting, setStarting] = useState(false);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -103,6 +104,19 @@ function App() {
     }
   }
 
+  async function retryJob(id: string) {
+    setRetryingJobId(id);
+    setNotice(null);
+    try {
+      const job = await invoke<JobSnapshot>("retry_clipping_job", { jobId: id });
+      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setRetryingJobId(null);
+    }
+  }
+
   async function copyOutput() {
     await navigator.clipboard.writeText(JSON.stringify(outputPreview, null, 2));
     setCopied(true);
@@ -143,7 +157,7 @@ function App() {
       </div>}
 
       {nav === "jobs" && (
-        <HistoryView jobs={jobs} onCancel={cancelJob} onNewRun={() => setNav("new")}/>
+        <HistoryView jobs={jobs} retryingJobId={retryingJobId} onCancel={cancelJob} onRetry={retryJob} onNewRun={() => setNav("new")}/>
       )}
       {nav === "presets" && (
         <PresetsView config={config} setConfig={setConfig} onUse={() => setNav("new")}/>

@@ -11,7 +11,7 @@ export const DEFAULT_CONFIG: ConfigState = {
   observerStepSeconds: 6,
   maturationDelaySeconds: 20,
   queueCapacity: 256,
-  frameIntervalSeconds: 1,
+  frameIntervalSeconds: 2,
   scribbleModel: "large_turbo",
   enableVad: true,
   language: "auto",
@@ -34,9 +34,13 @@ export const DEFAULT_CONFIG: ConfigState = {
 
 export function loadConfig(): ConfigState {
   try {
+    const saved = JSON.parse(localStorage.getItem("clipfarmer-config") || "{}");
     return {
       ...DEFAULT_CONFIG,
-      ...JSON.parse(localStorage.getItem("clipfarmer-config") || "{}"),
+      ...saved,
+      // Version-one configurations sampled every second. Move existing users to
+      // the cost-optimized cadence while retaining any slower custom cadence.
+      frameIntervalSeconds: Math.max(2, Number(saved.frameIntervalSeconds) || 2),
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -72,8 +76,8 @@ export function buildBackendConfig(config: ConfigState) {
     [config.provider]: {
       apiKeyEnv: config.apiKeyEnv,
       observerModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
-      directorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-sol",
-      editorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-sol",
+      directorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
+      editorModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-terra",
       criticModel: isGemini ? "gemini-3.7-flash" : "gpt-5.6-sol",
       audioModel: isGemini ? "gemini-3.7-flash" : "gpt-audio-1.5",
     },

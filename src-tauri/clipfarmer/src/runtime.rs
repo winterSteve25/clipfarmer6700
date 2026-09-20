@@ -178,32 +178,19 @@ impl LibraryRunner {
     ) -> Result<RunResult> {
         match source {
             JobSource::Channel { channel } => self.run_live(&channel, &mut cancellation).await,
-<<<<<<< HEAD
-            JobSource::Vod { url } => self.run_vod(&url, &mut cancellation).await,
+            JobSource::Vod { url } => {
+                self.run_vod_window(&url, None, None, resume_from_ms, &mut cancellation)
+                    .await
+            }
             JobSource::VodSlice {
                 url,
                 start_ms,
                 end_ms,
             } => {
-                self.run_vod_slice(&url, start_ms, end_ms, &mut cancellation)
+                self.run_vod_window(&url, Some(start_ms), Some(end_ms), 0, &mut cancellation)
                     .await
             }
         }
-    }
-
-    async fn run_vod(&self, url: &str, cancellation: &mut Cancellation) -> Result<RunResult> {
-        self.run_vod_window(url, None, None, cancellation).await
-    }
-
-    async fn run_vod_slice(
-        &self,
-        url: &str,
-        start_ms: i64,
-        end_ms: i64,
-        cancellation: &mut Cancellation,
-    ) -> Result<RunResult> {
-        self.run_vod_window(url, Some(start_ms), Some(end_ms), cancellation)
-            .await
     }
 
     async fn run_vod_window(
@@ -211,18 +198,8 @@ impl LibraryRunner {
         url: &str,
         requested_start_ms: Option<i64>,
         requested_end_ms: Option<i64>,
-        cancellation: &mut Cancellation,
-=======
-            JobSource::Vod { url } => self.run_vod(&url, &mut cancellation, resume_from_ms).await,
-        }
-    }
-
-    async fn run_vod(
-        &self,
-        url: &str,
-        cancellation: &mut Cancellation,
         resume_from_ms: i64,
->>>>>>> realui
+        cancellation: &mut Cancellation,
     ) -> Result<RunResult> {
         self.report(
             "preparing_vod",
@@ -235,24 +212,18 @@ impl LibraryRunner {
             chat_downloader: self.config.media.chat_downloader_path.clone(),
             cache_root: self.config.data_dir.join("vods"),
         };
-<<<<<<< HEAD
         let prepared = match (requested_start_ms, requested_end_ms) {
             (Some(start_ms), Some(end_ms)) => tokio::select! {
                 result = source.prepare_slice(url, None, start_ms, end_ms) => result?,
                 _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
             },
             (None, None) => tokio::select! {
-                result = source.prepare(url, None) => result?,
+                result = source.prepare_with_progress(url, None, |transferred_bytes| {
+                    self.report_download_progress(transferred_bytes);
+                }) => result?,
                 _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
             },
             _ => anyhow::bail!("VOD slice start and end must be provided together"),
-=======
-        let prepared = tokio::select! {
-            result = source.prepare_with_progress(url, None, |transferred_bytes| {
-                self.report_download_progress(transferred_bytes);
-            }) => result?,
-            _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
->>>>>>> realui
         };
         self.report(
             "preparing_vod",
@@ -279,63 +250,41 @@ impl LibraryRunner {
         }
         validate_vod_window(media_end_ms, start_ms, end_ms)?;
         let service = self.build_service(media_start_ms)?;
+        let scan_start_ms = if requested_start_ms.is_some() {
+            start_ms
+        } else {
+            resume_from_ms.clamp(start_ms, end_ms)
+        };
+        let analysis_duration_ms = end_ms - scan_start_ms;
         self.report(
             "analyzing",
-<<<<<<< HEAD
             if requested_start_ms.is_some() {
                 format!(
                     "Analyzing VOD slice {} → {}",
                     progress::timestamp(start_ms),
                     progress::timestamp(end_ms)
-=======
-            if resume_from_ms > 0 {
+                )
+            } else if resume_from_ms > 0 {
                 format!(
                     "Resuming VOD analysis near {} seconds",
-                    resume_from_ms / 1_000
->>>>>>> realui
+                    scan_start_ms / 1_000
                 )
             } else {
                 "Analyzing the downloaded VOD".to_owned()
             },
-<<<<<<< HEAD
-            Some(end_ms - start_ms),
-            None,
-        );
-        let mut work = Box::pin(service.scan_file(&channel, &input, end_ms, start_ms));
-        let mut pulse = tokio::time::interval(Duration::from_secs(2));
-        let summary = loop {
-            tokio::select! {
-                result = &mut work => break result?,
-                _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
-                _ = pulse.tick() => self.report(
-                    "analyzing",
-                    if requested_start_ms.is_some() {
-                        format!(
-                            "Analyzing VOD slice {} → {}",
-                            progress::timestamp(start_ms),
-                            progress::timestamp(end_ms)
-                        )
-                    } else {
-                        "Analyzing the downloaded VOD".to_owned()
-                    },
-                    Some(end_ms - start_ms),
-                    None,
-                ),
-            }
-=======
-            Some(duration),
+            Some(analysis_duration_ms),
             None,
         );
         let mut work = Box::pin(service.scan_file_with_progress(
             &channel,
             &input,
-            duration,
-            resume_from_ms.min(duration).max(0),
+            end_ms,
+            scan_start_ms,
             |completed, total, summary| {
                 self.report_progress(
                     "analyzing",
                     format!("Analyzed window {completed} of {total}"),
-                    Some(duration),
+                    Some(analysis_duration_ms),
                     Some(summary),
                     completed,
                     total,
@@ -345,7 +294,6 @@ impl LibraryRunner {
         let summary = tokio::select! {
             result = &mut work => result?,
             _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
->>>>>>> realui
         };
         drop(work);
         Ok(RunResult { channel, summary })
@@ -591,11 +539,8 @@ impl LibraryRunner {
                             model: cfg.openai.audio_model.clone(),
                             ffmpeg: cfg.media.ffmpeg_path.clone(),
                             work_dir: cfg.data_dir.join("audio-analysis/openai"),
-<<<<<<< HEAD
                             media_start_ms,
-=======
                             db_path: cfg.db_path(),
->>>>>>> realui
                         }),
                     )
                 }
@@ -891,6 +836,7 @@ mod tests {
             candidates_rejected: 4,
             posts_completed: 5,
             publish_failures: 6,
+            estimated_api_cost_usd: None,
         };
 
         let dto = RunSummaryDto::from(&summary);

@@ -245,15 +245,9 @@ pub struct OpenAiConfig {
     pub api_key_env: String,
     #[serde(default = "default_luna_model")]
     pub observer_model: String,
-<<<<<<< HEAD
     #[serde(default = "default_luna_model")]
     pub director_model: String,
     #[serde(default = "default_luna_model")]
-=======
-    #[serde(default = "default_observer_model")]
-    pub director_model: String,
-    #[serde(default = "default_observer_model")]
->>>>>>> realui
     pub editor_model: String,
     #[serde(default = "default_luna_model")]
     pub critic_model: String,
@@ -275,17 +269,10 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             api_key_env: default_api_key_env(),
-<<<<<<< HEAD
             observer_model: default_luna_model(),
             director_model: default_luna_model(),
             editor_model: default_luna_model(),
             critic_model: default_luna_model(),
-=======
-            observer_model: default_observer_model(),
-            director_model: default_observer_model(),
-            editor_model: default_observer_model(),
-            critic_model: default_sol_model(),
->>>>>>> realui
             audio_model: default_audio_model(),
         }
     }
@@ -478,22 +465,8 @@ impl Config {
                     &self.openai.critic_model,
                 ];
                 ensure!(
-<<<<<<< HEAD
                     models.iter().all(|model| model.as_str() == "gpt-5.6-luna"),
                     "OpenAI observer, director, editor, and critic must use gpt-5.6-luna"
-=======
-                    self.openai.observer_model == "gpt-5.6-terra",
-                    "OpenAI observer model must be gpt-5.6-terra for this architecture"
-                );
-                ensure!(
-                    self.openai.director_model == "gpt-5.6-terra"
-                        && self.openai.editor_model == "gpt-5.6-terra",
-                    "OpenAI director and editor models must use gpt-5.6-terra"
-                );
-                ensure!(
-                    self.openai.critic_model == "gpt-5.6-sol",
-                    "OpenAI critic model must use gpt-5.6-sol"
->>>>>>> realui
                 );
                 ensure!(
                     self.openai.audio_model == "gpt-audio-1.5",
@@ -549,7 +522,6 @@ mod tests {
     fn defaults_match_the_former_example_configuration() {
         let config = Config::default();
         assert_eq!(config.worker.poll_seconds, 10);
-<<<<<<< HEAD
         assert_eq!(config.models.provider, ModelProvider::OpenAi);
         assert_eq!(config.openai.api_key_env, "CLIPFARMER_OPENAI_KEY");
         assert!(
@@ -565,10 +537,6 @@ mod tests {
         assert!(config.models.visual_evidence);
         assert!(config.models.audio_analysis);
         assert!(config.models.chat_evidence);
-=======
-        assert_eq!(config.models.provider, ModelProvider::Gemini);
-        assert_eq!(config.scribble.model_variant, ScribbleModel::LargeTurbo);
->>>>>>> realui
         assert!(config.publishers.dry_run);
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
@@ -584,15 +552,10 @@ mod tests {
     fn empty_frontend_config_uses_example_defaults() {
         let config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(config.worker.poll_seconds, 10);
-<<<<<<< HEAD
         assert_eq!(config.models.provider, ModelProvider::OpenAi);
         assert!(config.models.visual_evidence);
         assert!(config.models.audio_analysis);
         assert!(config.models.chat_evidence);
-=======
-        assert_eq!(config.models.provider, ModelProvider::Gemini);
-        assert_eq!(config.scribble.model_variant, ScribbleModel::LargeTurbo);
->>>>>>> realui
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
     }

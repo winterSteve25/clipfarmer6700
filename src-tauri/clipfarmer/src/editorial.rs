@@ -74,21 +74,6 @@ where
             "candidate must be ready for review"
         );
         let mut decisions = Vec::with_capacity(3);
-<<<<<<< HEAD
-        for stage in [
-            EditorialStage::Director,
-            EditorialStage::Editor,
-            EditorialStage::Critic,
-        ] {
-            let mut decision = self
-                .model
-                .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
-                .await?;
-            clamp_primary_cut(&mut decision, candidate.start_ms, candidate.end_ms);
-            discard_invalid_alternatives(&mut decision, candidate.start_ms, candidate.end_ms);
-            validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
-            decisions.push(decision);
-=======
         let director = self
             .model
             .decide(
@@ -120,7 +105,6 @@ where
                 validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
                 decisions.push(decision);
             }
->>>>>>> realui
         }
         let final_decision = decisions
             .last()
@@ -499,7 +483,6 @@ mod tests {
         assert!(serde_json::from_str::<serde_json::Value>(&payload).is_ok());
     }
 
-<<<<<<< HEAD
     #[test]
     fn invalid_alternatives_and_overlapping_primary_cuts_are_normalized() {
         let mut decision = EditorialDecision {
@@ -565,7 +548,22 @@ mod tests {
             rationale: "valid decision with stale stage metadata".to_owned(),
             title: "Candidate".to_owned(),
             start_ms: 10_000,
-=======
+            end_ms: 20_000,
+            hook_text: None,
+            layout: None,
+            alternatives: Vec::new(),
+        };
+        assert_eq!(
+            normalize_decision_stage(&mut decision, EditorialStage::Editor),
+            Some(EditorialStage::Director)
+        );
+        assert_eq!(decision.stage, EditorialStage::Editor);
+        assert_eq!(
+            normalize_decision_stage(&mut decision, EditorialStage::Editor),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn confident_director_rejection_skips_remaining_review() {
         let audio_calls = Arc::new(AtomicUsize::new(0));
@@ -638,23 +636,11 @@ mod tests {
             rationale: "complete moment".to_owned(),
             title: "Clip".to_owned(),
             start_ms: 0,
->>>>>>> realui
             end_ms: 20_000,
             hook_text: None,
             layout: None,
             alternatives: Vec::new(),
         };
-<<<<<<< HEAD
-        assert_eq!(
-            normalize_decision_stage(&mut decision, EditorialStage::Editor),
-            Some(EditorialStage::Director)
-        );
-        assert_eq!(decision.stage, EditorialStage::Editor);
-        assert_eq!(
-            normalize_decision_stage(&mut decision, EditorialStage::Editor),
-            None
-        );
-=======
 
         let (normalized, changed) = normalize_decision_bounds(decision, 120_000, 145_000);
 
@@ -662,6 +648,5 @@ mod tests {
         assert!(!normalized.accept);
         assert_eq!((normalized.start_ms, normalized.end_ms), (120_000, 145_000));
         validate_decision(&normalized, 120_000, 145_000).unwrap();
->>>>>>> realui
     }
 }

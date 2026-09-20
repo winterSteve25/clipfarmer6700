@@ -7,13 +7,8 @@ use crate::{
     adapters::curl_json_with_secret_header,
     domain::{AudioAnnotation, Candidate, EditorialDecision, EditorialStage, EvidenceWindow},
     editorial::{
-<<<<<<< HEAD
-        CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, decision_schema,
-        evidence_payload, normalize_decision_stage, role_instructions,
-=======
         CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, boundary_instructions,
-        decision_schema, evidence_payload, role_instructions,
->>>>>>> realui
+        decision_schema, evidence_payload, normalize_decision_stage, role_instructions,
     },
 };
 use anyhow::{Context, Result, ensure};

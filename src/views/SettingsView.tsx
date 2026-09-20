@@ -41,10 +41,14 @@ export function SettingsView({ accounts, busyPlatform, onConnect, onDisconnect }
     }
   }
 
+  const connectedCount = accounts.filter((account) => account.connected).length;
+
   return <section className="settings-view" aria-labelledby="connected-accounts-heading">
     <div className="settings-intro">
-      <span className="eyebrow">PUBLISHING ACCOUNTS</span>
-      <h2 id="connected-accounts-heading">Connected accounts</h2>
+      <div className="settings-intro-head">
+        <h2 id="connected-accounts-heading">Connected accounts</h2>
+        <span className="settings-count"><strong>{connectedCount}</strong>/{PLATFORMS.length} connected</span>
+      </div>
       <p>Connect each destination you want ClipFarmer to publish to. Credentials are stored in the app's private local data folder and are never shown again after saving.</p>
     </div>
 

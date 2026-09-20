@@ -28,7 +28,7 @@ function phaseLabel(phase: string) {
 }
 
 function formatDuration(milliseconds: number | null | undefined) {
-  if (milliseconds == null) return "—";
+  if (milliseconds == null) return "-";
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -125,7 +125,7 @@ function JobCard({ job, now, retrying, onCancel, onRetry }: { job: JobSnapshot; 
   return <details className={`job-card ${job.status}`} open={active || job.status === "failed"}>
     <summary>
       <span className={`job-state ${job.status}`}><Icon name={active ? "radio" : job.status === "completed" ? "check" : "x"}/></span>
-      <span className="job-main"><strong>{jobName(job)}</strong><span><b>{phaseLabel(job.progress.phase)}</b> · {job.progress.message}</span>{active && <ProgressBar progress={job.progress}/>}</span>
+      <span className="job-main"><strong>{jobName(job)}</strong><span><b>{phaseLabel(job.progress.phase)}</b> - {job.progress.message}</span>{active && <ProgressBar progress={job.progress}/>}</span>
       <span className="job-quick-stats">{percent != null && <strong>{percent}%</strong>}{job.progress.transferredBytes != null && <strong>{formatBytes(job.progress.transferredBytes)} downloaded</strong>}<span>{formatDuration(runtime)} elapsed</span>{job.progress.capturedMs != null && <span>{formatDuration(job.progress.capturedMs)} captured</span>}</span>
       <span className={`status-badge ${job.status}`}>{job.status}</span>
       <span className="job-expand"><Icon name="chevron" size={16}/></span>
@@ -186,7 +186,7 @@ export function HistoryView({ jobs, retryingJobId, onCancel, onRetry, onNewRun }
   return <section className="history-view">
     <div className="history-summary"><SummaryPill label="Runs" value={jobs.length}/><SummaryPill label="Approved" value={accepted} tone="good"/><SummaryPill label="Rejected" value={rejected}/><SummaryPill label="Failed runs" value={failed} tone={failed ? "bad" : undefined}/></div>
     <div className="history-card">
-      <div className="history-card-head"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Clipping runs</h2></div><button className="primary-small" onClick={onNewRun}><Icon name="plus" size={15}/>New run</button></div>
+      <div className="history-card-head"><h2>Clipping runs</h2><button className="primary-small" onClick={onNewRun}><Icon name="plus" size={15}/>New run</button></div>
       {jobs.length ? <div className="job-list">{jobs.map((job) => <JobCard key={job.id} job={job} now={now} retrying={retryingJobId === job.id} onCancel={onCancel} onRetry={onRetry}/>)}</div> : <div className="empty-state"><span><Icon name="film" size={28}/></span><h3>No runs yet</h3><p>Start a live channel or VOD run to see progress, diagnostics, and result totals here.</p><button onClick={onNewRun}>Configure first run</button></div>}
     </div>
   </section>;

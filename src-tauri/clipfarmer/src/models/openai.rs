@@ -7,13 +7,8 @@ use crate::{
     adapters::curl_json,
     domain::{AudioAnnotation, Candidate, EditorialDecision, EditorialStage, EvidenceWindow},
     editorial::{
-<<<<<<< HEAD
-        CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, decision_schema,
-        evidence_payload, normalize_decision_stage, role_instructions,
-=======
         CandidateAudioAnalyzer, EditorialModel, audio_annotation_schema, boundary_instructions,
-        decision_schema, evidence_payload, role_instructions,
->>>>>>> realui
+        decision_schema, evidence_payload, normalize_decision_stage, role_instructions,
     },
     store::Store,
 };
@@ -136,11 +131,8 @@ pub struct OpenAiAudioAnalyzer {
     pub model: String,
     pub ffmpeg: PathBuf,
     pub work_dir: PathBuf,
-<<<<<<< HEAD
     pub media_start_ms: i64,
-=======
     pub db_path: PathBuf,
->>>>>>> realui
 }
 
 #[async_trait]

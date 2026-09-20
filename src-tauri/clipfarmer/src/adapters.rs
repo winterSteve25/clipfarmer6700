@@ -680,8 +680,8 @@ impl TwitchVodSource {
         url: &str,
         channel_override: Option<&str>,
     ) -> Result<PreparedTwitchVod> {
-<<<<<<< HEAD
-        self.prepare_window(url, channel_override, None).await
+        self.prepare_window(url, channel_override, None, |_| {})
+            .await
     }
 
     pub async fn prepare_slice(
@@ -697,7 +697,17 @@ impl TwitchVodSource {
             end_ms - start_ms >= 5_000,
             "VOD slice must be at least five seconds"
         );
-        self.prepare_window(url, channel_override, Some((start_ms, end_ms)))
+        self.prepare_window(url, channel_override, Some((start_ms, end_ms)), |_| {})
+            .await
+    }
+
+    pub async fn prepare_with_progress(
+        &self,
+        url: &str,
+        channel_override: Option<&str>,
+        on_download_progress: impl FnMut(u64),
+    ) -> Result<PreparedTwitchVod> {
+        self.prepare_window(url, channel_override, None, on_download_progress)
             .await
     }
 
@@ -706,17 +716,7 @@ impl TwitchVodSource {
         url: &str,
         channel_override: Option<&str>,
         media_window: Option<(i64, i64)>,
-=======
-        self.prepare_with_progress(url, channel_override, |_| {})
-            .await
-    }
-
-    pub async fn prepare_with_progress(
-        &self,
-        url: &str,
-        channel_override: Option<&str>,
         mut on_download_progress: impl FnMut(u64),
->>>>>>> realui
     ) -> Result<PreparedTwitchVod> {
         let id = twitch_vod_id(url)?.to_owned();
         let canonical_url = format!("https://www.twitch.tv/videos/{id}");
@@ -767,12 +767,13 @@ impl TwitchVodSource {
                 progress::bytes(size)
             ));
         } else {
-<<<<<<< HEAD
-            self.download_media(&canonical_url, &media_path, media_window)
-=======
-            self.download_media(&canonical_url, &media_path, &mut on_download_progress)
->>>>>>> realui
-                .await?;
+            self.download_media(
+                &canonical_url,
+                &media_path,
+                media_window,
+                &mut on_download_progress,
+            )
+            .await?;
         }
         let chat_path = media_path.with_extension("chat.jsonl");
         let cached_chat_size = fs::metadata(&chat_path).ok().map(|metadata| metadata.len());
@@ -784,16 +785,12 @@ impl TwitchVodSource {
                 progress::bytes(size)
             ));
         } else {
-<<<<<<< HEAD
             if cached_chat_size.is_some() {
                 progress::warning("Cached chat is empty; retrying bounded chat download");
                 let _ = fs::remove_file(&chat_path);
             }
             self.download_chat(&canonical_url, &chat_path, media_window)
                 .await?;
-=======
-            // self.download_chat(&canonical_url, &chat_path).await?;
->>>>>>> realui
         }
         Ok(PreparedTwitchVod {
             id,
@@ -824,16 +821,12 @@ impl TwitchVodSource {
         &self,
         url: &str,
         destination: &Path,
-<<<<<<< HEAD
         media_window: Option<(i64, i64)>,
-=======
         on_progress: &mut impl FnMut(u64),
->>>>>>> realui
     ) -> Result<()> {
         let temporary =
             destination.with_file_name(format!("source-{}.part.ts", uuid::Uuid::new_v4()));
         let download = ByteProgress::start("Downloading Twitch VOD", &temporary);
-<<<<<<< HEAD
         let mut command = tokio::process::Command::new(&self.streamlink);
         command.args(["--force", "--progress", "no"]);
         if let Some((start_ms, end_ms)) = media_window {
@@ -844,12 +837,8 @@ impl TwitchVodSource {
                 .args(["--stream-segmented-duration"])
                 .arg(seconds(end_ms - download_start_ms));
         }
-        let output = command
+        let child = command
             .args(["--output"])
-=======
-        let child = tokio::process::Command::new(&self.streamlink)
-            .args(["--force", "--progress", "no", "--output"])
->>>>>>> realui
             .arg(&temporary)
             .arg(url)
             .arg("best")
@@ -1285,10 +1274,6 @@ async fn curl_json_authenticated(
     } else {
         None
     };
-<<<<<<< HEAD
-    command.args(["--url", url]);
-=======
->>>>>>> realui
     let output_result = match secret_header {
         Some((name, value)) => run_curl_with_secret_header(command, name, value, url).await,
         None => {
@@ -1553,6 +1538,7 @@ mod tests {
             .download_media(
                 "https://www.twitch.tv/videos/123456789",
                 &destination,
+                None,
                 &mut |bytes| {
                     samples.push(bytes);
                 },

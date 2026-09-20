@@ -492,86 +492,10 @@ impl Service {
             "candidate is not ready"
         );
 
-<<<<<<< HEAD
-        let audio = if self.cfg.models.audio_analysis {
-            let audio_step = Step::start("Analyzing candidate audio");
-            let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
-            audio_step.done(format!(
-                "{:.0}% confidence, {} detected events",
-                audio.confidence * 100.0,
-                audio.nonverbal_events.len()
-            ));
-            audio
-        } else {
-            progress::info("Candidate audio analysis disabled");
-            unavailable_audio_annotation(&candidate)
-        };
-        let audio_for_model = self.cfg.models.audio_analysis.then_some(&audio);
-=======
->>>>>>> realui
         let mut decisions = Vec::new();
         let director_step = Step::start(format!(
             "Running {} ({})",
             EditorialStage::Director,
-<<<<<<< HEAD
-            EditorialStage::Editor,
-            EditorialStage::Critic,
-        ] {
-            let editorial_step = Step::start(format!(
-                "Running {stage} ({})",
-                self.editorial.model_name(stage)
-            ));
-            let mut decision = self
-                .editorial
-                .decide(
-                    stage,
-                    evidence,
-                    Some(&candidate),
-                    &decisions,
-                    audio_for_model,
-                )
-                .await?;
-            let original_cut = (decision.start_ms, decision.end_ms);
-            if crate::editorial::clamp_primary_cut(
-                &mut decision,
-                candidate.start_ms,
-                candidate.end_ms,
-            ) {
-                progress::warning(format!(
-                    "Clamped {stage} cut {} → {} to candidate bounds {} → {}",
-                    progress::timestamp(original_cut.0),
-                    progress::timestamp(original_cut.1),
-                    progress::timestamp(decision.start_ms),
-                    progress::timestamp(decision.end_ms)
-                ));
-            }
-            let discarded = crate::editorial::discard_invalid_alternatives(
-                &mut decision,
-                candidate.start_ms,
-                candidate.end_ms,
-            );
-            if discarded > 0 {
-                progress::warning(format!(
-                    "Discarded {discarded} out-of-bounds {stage} alternative(s)"
-                ));
-            }
-            crate::editorial::validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
-            self.store.record_decision(
-                &candidate.id,
-                self.editorial.model_name(stage),
-                &decision,
-            )?;
-            editorial_step.done(format!(
-                "{} at {:.0}% confidence",
-                if decision.accept {
-                    "accepted"
-                } else {
-                    "rejected"
-                },
-                decision.confidence * 100.0
-            ));
-            decisions.push(decision);
-=======
             self.editorial.model_name(EditorialStage::Director)
         ));
         let director = self
@@ -590,7 +514,6 @@ impl Service {
             progress::warning(
                 "Director returned invalid boundaries; normalized this candidate instead of stopping the run",
             );
->>>>>>> realui
         }
         crate::editorial::validate_decision(&director, candidate.start_ms, candidate.end_ms)?;
         self.store.record_decision(
@@ -612,6 +535,9 @@ impl Service {
         let audio = if confidently_rejected {
             progress::info("Skipping audio and final review after confident director rejection");
             skipped_audio_annotation()
+        } else if !self.cfg.models.audio_analysis {
+            progress::info("Candidate audio analysis disabled");
+            unavailable_audio_annotation(&candidate)
         } else {
             let audio_step = Step::start("Analyzing candidate audio");
             let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
@@ -622,6 +548,7 @@ impl Service {
             ));
             audio
         };
+        let audio_for_model = self.cfg.models.audio_analysis.then_some(&audio);
         if !confidently_rejected {
             for stage in [EditorialStage::Editor, EditorialStage::Critic] {
                 let editorial_step = Step::start(format!(
@@ -630,7 +557,13 @@ impl Service {
                 ));
                 let decision = self
                     .editorial
-                    .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
+                    .decide(
+                        stage,
+                        evidence,
+                        Some(&candidate),
+                        &decisions,
+                        audio_for_model,
+                    )
                     .await?;
                 let (decision, decision_repaired) =
                     normalize_decision_bounds(decision, candidate.start_ms, candidate.end_ms);

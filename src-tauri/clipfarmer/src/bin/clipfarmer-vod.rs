@@ -21,7 +21,8 @@ async fn main() -> Result<()> {
         config,
         options.data_dir,
         ModelPaths {
-            transcription: model_root.join("ggml-large-v3-turbo-q5_0.bin"),
+            large_turbo_transcription: model_root.join("ggml-large-v3-turbo-q5_0.bin"),
+            tiny_transcription: model_root.join("ggml-tiny-q5_1.bin"),
             voice_activity_detection: model_root.join("ggml-silero-v6.2.0.bin"),
         },
         false,
@@ -36,6 +37,7 @@ async fn main() -> Result<()> {
                 end_ms: options.end_ms,
             },
             cancellation,
+            0,
         )
         .await?;
 

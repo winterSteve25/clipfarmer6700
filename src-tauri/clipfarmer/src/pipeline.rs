@@ -6,8 +6,8 @@ use crate::{
     adapters::{ObjectStore, Publisher, Renderer, SignalExtractor, Transcriber, VisualSampler},
     config::Config,
     domain::{
-        Candidate, ChannelProfile, ChatEvent, ClipState, EditorialDecision, EditorialStage,
-        EvidenceWindow, LocalSignals, Outcome, SignalEvidence, TranscriptSegment,
+        AudioAnnotation, Candidate, ChannelProfile, ChatEvent, ClipState, EditorialDecision,
+        EditorialStage, EvidenceWindow, LocalSignals, Outcome, SignalEvidence, TranscriptSegment,
     },
     editorial::{CandidateAudioAnalyzer, EditorialModel, ReviewResult},
     evidence::EvidenceRing,
@@ -130,6 +130,11 @@ impl Service {
         let chat_step = Step::start("Loading timestamped chat");
         let chat = load_chat_sidecar(input_path, &session_id)?;
         chat_step.done(format!("{} messages", chat.len()));
+        let evidence_chat: &[ChatEvent] = if self.cfg.models.chat_evidence {
+            &chat
+        } else {
+            &[]
+        };
         let mut summary = RunSummary::default();
         let mut audio_energy_total = 0.0;
         let total_windows = ((duration_ms - cursor + step_ms - 1) / step_ms + 1).max(1);
@@ -163,24 +168,30 @@ impl Service {
                 transcripts.segments().len()
             ));
 
-            let frame_dir = self
-                .cfg
-                .data_dir
-                .join("frames")
-                .join(&session_id)
-                .join(format!("{window_start}-{window_end}"));
-            let visuals_step = Step::start("Sampling video frames");
-            let new_visuals = self
-                .visual_sampler
-                .sample(
-                    input_path,
-                    &frame_dir,
-                    window_start,
-                    window_end,
-                    self.cfg.media.frame_interval_seconds,
-                )
-                .await?;
-            visuals_step.done(format!("{} frames", new_visuals.len()));
+            let new_visuals = if self.cfg.models.visual_evidence {
+                let frame_dir = self
+                    .cfg
+                    .data_dir
+                    .join("frames")
+                    .join(&session_id)
+                    .join(format!("{window_start}-{window_end}"));
+                let visuals_step = Step::start("Sampling video frames");
+                let new_visuals = self
+                    .visual_sampler
+                    .sample(
+                        input_path,
+                        &frame_dir,
+                        window_start,
+                        window_end,
+                        self.cfg.media.frame_interval_seconds,
+                    )
+                    .await?;
+                visuals_step.done(format!("{} frames", new_visuals.len()));
+                new_visuals
+            } else {
+                progress::info("Video frame evidence disabled");
+                Vec::new()
+            };
             visuals.extend(new_visuals);
 
             let signals_step = Step::start("Measuring audio and scene changes");
@@ -200,7 +211,7 @@ impl Service {
                 window_end,
                 &EvidenceSlice {
                     transcripts: transcripts.segments(),
-                    chat: &chat,
+                    chat: evidence_chat,
                     visuals: &visuals,
                     profile: &profile,
                     local_signals: Some(local_signals),
@@ -249,7 +260,7 @@ impl Service {
                 ready,
                 &EvidenceSlice {
                     transcripts: transcripts.segments(),
-                    chat: &chat,
+                    chat: evidence_chat,
                     visuals: &visuals,
                     profile: &profile,
                     local_signals: Some(local_signals),
@@ -271,7 +282,7 @@ impl Service {
             ready,
             &EvidenceSlice {
                 transcripts: transcripts.segments(),
-                chat: &chat,
+                chat: evidence_chat,
                 visuals: &visuals,
                 profile: &profile,
                 local_signals: None,
@@ -343,8 +354,10 @@ impl Service {
             if review.accepted {
                 summary.candidates_accepted += 1;
                 progress::success(format!(
-                    "Candidate accepted: {}",
-                    review.final_decision.title
+                    "Candidate accepted: {} ({} → {})",
+                    review.final_decision.title,
+                    progress::timestamp(review.final_decision.start_ms),
+                    progress::timestamp(review.final_decision.end_ms)
                 ));
                 match self
                     .render_and_publish(input_path, &review, context.transcripts)
@@ -444,13 +457,20 @@ impl Service {
             "candidate is not ready"
         );
 
-        let audio_step = Step::start("Analyzing candidate audio");
-        let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
-        audio_step.done(format!(
-            "{:.0}% confidence, {} detected events",
-            audio.confidence * 100.0,
-            audio.nonverbal_events.len()
-        ));
+        let audio = if self.cfg.models.audio_analysis {
+            let audio_step = Step::start("Analyzing candidate audio");
+            let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
+            audio_step.done(format!(
+                "{:.0}% confidence, {} detected events",
+                audio.confidence * 100.0,
+                audio.nonverbal_events.len()
+            ));
+            audio
+        } else {
+            progress::info("Candidate audio analysis disabled");
+            unavailable_audio_annotation(&candidate)
+        };
+        let audio_for_model = self.cfg.models.audio_analysis.then_some(&audio);
         let mut decisions = Vec::new();
         for stage in [
             EditorialStage::Director,
@@ -461,10 +481,26 @@ impl Service {
                 "Running {stage} ({})",
                 self.editorial.model_name(stage)
             ));
-            let decision = self
+            let mut decision = self
                 .editorial
-                .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
+                .decide(
+                    stage,
+                    evidence,
+                    Some(&candidate),
+                    &decisions,
+                    audio_for_model,
+                )
                 .await?;
+            let discarded = crate::editorial::discard_invalid_alternatives(
+                &mut decision,
+                candidate.start_ms,
+                candidate.end_ms,
+            );
+            if discarded > 0 {
+                progress::warning(format!(
+                    "Discarded {discarded} out-of-bounds {stage} alternative(s)"
+                ));
+            }
             crate::editorial::validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
             self.store.record_decision(
                 &candidate.id,
@@ -518,18 +554,24 @@ impl Service {
             .join(format!("{}.mp4", candidate.id));
 
         let manifest_step = Step::start("Building edit manifest and captions");
+        let mut manifest_decision = review.final_decision.clone();
+        if !self.cfg.models.visual_evidence {
+            manifest_decision.layout = Some("full_frame".to_owned());
+        }
         let manifest = build_manifest(
             candidate,
-            &review.final_decision,
+            &manifest_decision,
             input_path,
             &output_path.display().to_string(),
             transcripts,
         )?;
         self.store.record_manifest(&manifest)?;
         manifest_step.done(format!(
-            "{} captions, {} layout",
+            "{} captions, {} layout, {} → {}",
             manifest.captions.len(),
-            manifest.layout
+            manifest.layout,
+            progress::timestamp(manifest.source_start_ms),
+            progress::timestamp(manifest.source_end_ms)
         ));
 
         let render_step = Step::start("Rendering vertical clip with ffmpeg");
@@ -573,7 +615,12 @@ impl Service {
                 continue;
             }
             let key = format!("{}:{}", publisher.platform(), candidate.idempotency_key());
-            let publish_step = Step::start(format!("Publishing to {}", publisher.platform()));
+            let publish_step = Step::start(format!(
+                "Publishing {} → {} to {}",
+                progress::timestamp(manifest.source_start_ms),
+                progress::timestamp(manifest.source_end_ms),
+                publisher.platform()
+            ));
             match publisher
                 .publish(
                     candidate,
@@ -629,6 +676,16 @@ impl Service {
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+fn unavailable_audio_annotation(candidate: &Candidate) -> AudioAnnotation {
+    AudioAnnotation {
+        emotional_arc: "not analyzed".to_owned(),
+        nonverbal_events: Vec::new(),
+        hook_ms: None,
+        payoff_ms: candidate.payoff_ms,
+        confidence: 0.0,
+    }
 }
 
 fn display_location(location: &str) -> String {

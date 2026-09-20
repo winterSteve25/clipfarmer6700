@@ -17,13 +17,16 @@ pub(crate) async fn extract_candidate_audio(
     input_path: &str,
     candidate: &Candidate,
     sample_rate: u32,
+    media_start_ms: i64,
 ) -> Result<Vec<u8>> {
     validate_safe_path(input_path)?;
     fs::create_dir_all(work_dir)?;
     let wav = work_dir.join(format!("candidate-audio-{}.wav", uuid::Uuid::new_v4()));
     let extracted = tokio::process::Command::new(ffmpeg)
         .args(["-y", "-v", "error", "-ss"])
-        .arg(seconds(candidate.start_ms))
+        .arg(seconds(
+            candidate.start_ms.saturating_sub(media_start_ms).max(0),
+        ))
         .args(["-t"])
         .arg(seconds(candidate.duration_ms()))
         .args(["-i", input_path, "-vn", "-ac", "1", "-ar"])

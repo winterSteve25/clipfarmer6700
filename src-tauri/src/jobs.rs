@@ -83,7 +83,7 @@ impl JobManager {
             source: source.clone(),
             channel: match &source {
                 JobSource::Channel { channel } => Some(channel.clone()),
-                JobSource::Vod { .. } => None,
+                JobSource::Vod { .. } | JobSource::VodSlice { .. } => None,
             },
             output_dir,
             status: JobStatus::Queued,
@@ -315,6 +315,19 @@ fn validate_source(source: &JobSource) -> Result<(), String> {
             Ok(())
         }
         JobSource::Vod { .. } => Err("invalid Twitch VOD URL".to_owned()),
+        JobSource::VodSlice {
+            url,
+            start_ms,
+            end_ms,
+        } if (url.starts_with("https://www.twitch.tv/videos/")
+            || url.starts_with("https://twitch.tv/videos/"))
+            && *start_ms >= 0
+            && *end_ms > *start_ms
+            && end_ms.saturating_sub(*start_ms) >= 5_000 =>
+        {
+            Ok(())
+        }
+        JobSource::VodSlice { .. } => Err("invalid Twitch VOD slice".to_owned()),
     }
 }
 
@@ -350,6 +363,18 @@ mod tests {
         .is_ok());
         assert!(validate_source(&JobSource::Vod {
             url: "https://example.com/123".into()
+        })
+        .is_err());
+        assert!(validate_source(&JobSource::VodSlice {
+            url: "https://www.twitch.tv/videos/123".into(),
+            start_ms: 30_000,
+            end_ms: 45_000,
+        })
+        .is_ok());
+        assert!(validate_source(&JobSource::VodSlice {
+            url: "https://www.twitch.tv/videos/123".into(),
+            start_ms: 30_000,
+            end_ms: 34_999,
         })
         .is_err());
     }

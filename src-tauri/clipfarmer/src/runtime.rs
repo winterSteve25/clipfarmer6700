@@ -19,6 +19,7 @@ use crate::{
         openai::{OpenAiAudioAnalyzer, OpenAiEditorial},
     },
     pipeline::RunSummary,
+    progress,
     publishers::{InstagramPublisher, TikTokDraftPublisher, TwitchClipPublisher, YouTubePublisher},
 };
 use anyhow::{Context, Result, ensure};
@@ -34,8 +35,17 @@ use tokio::sync::watch;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobSource {
-    Channel { channel: String },
-    Vod { url: String },
+    Channel {
+        channel: String,
+    },
+    Vod {
+        url: String,
+    },
+    VodSlice {
+        url: String,
+        start_ms: i64,
+        end_ms: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,10 +169,39 @@ impl LibraryRunner {
         match source {
             JobSource::Channel { channel } => self.run_live(&channel, &mut cancellation).await,
             JobSource::Vod { url } => self.run_vod(&url, &mut cancellation).await,
+            JobSource::VodSlice {
+                url,
+                start_ms,
+                end_ms,
+            } => {
+                self.run_vod_slice(&url, start_ms, end_ms, &mut cancellation)
+                    .await
+            }
         }
     }
 
     async fn run_vod(&self, url: &str, cancellation: &mut Cancellation) -> Result<RunResult> {
+        self.run_vod_window(url, None, None, cancellation).await
+    }
+
+    async fn run_vod_slice(
+        &self,
+        url: &str,
+        start_ms: i64,
+        end_ms: i64,
+        cancellation: &mut Cancellation,
+    ) -> Result<RunResult> {
+        self.run_vod_window(url, Some(start_ms), Some(end_ms), cancellation)
+            .await
+    }
+
+    async fn run_vod_window(
+        &self,
+        url: &str,
+        requested_start_ms: Option<i64>,
+        requested_end_ms: Option<i64>,
+        cancellation: &mut Cancellation,
+    ) -> Result<RunResult> {
         self.report(
             "preparing_vod",
             "Resolving and downloading the Twitch VOD",
@@ -174,9 +213,16 @@ impl LibraryRunner {
             chat_downloader: self.config.media.chat_downloader_path.clone(),
             cache_root: self.config.data_dir.join("vods"),
         };
-        let prepared = tokio::select! {
-            result = source.prepare(url, None) => result?,
-            _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
+        let prepared = match (requested_start_ms, requested_end_ms) {
+            (Some(start_ms), Some(end_ms)) => tokio::select! {
+                result = source.prepare_slice(url, None, start_ms, end_ms) => result?,
+                _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
+            },
+            (None, None) => tokio::select! {
+                result = source.prepare(url, None) => result?,
+                _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
+            },
+            _ => anyhow::bail!("VOD slice start and end must be provided together"),
         };
         self.report(
             "preparing_vod",
@@ -186,24 +232,57 @@ impl LibraryRunner {
         );
         let input = prepared.media_path.to_string_lossy().into_owned();
         let channel = prepared.channel_login;
-        let duration = tokio::select! {
-            result = probe_duration_ms(&self.config, &input) => result?,
+        let (media_start_ms, media_end_ms) = tokio::select! {
+            result = probe_media_bounds(&self.config, &input) => result?,
             _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
         };
-        let service = self.build_service()?;
+        let requested_start = requested_start_ms.unwrap_or(media_start_ms);
+        let requested_end = requested_end_ms.unwrap_or(media_end_ms);
+        let start_ms = requested_start.max(media_start_ms);
+        let end_ms = requested_end.min(media_end_ms);
+        if start_ms != requested_start || end_ms != requested_end {
+            progress::warning(format!(
+                "downloaded media bounds are {} → {}; analyzing the available overlap",
+                progress::timestamp(media_start_ms),
+                progress::timestamp(media_end_ms)
+            ));
+        }
+        validate_vod_window(media_end_ms, start_ms, end_ms)?;
+        let service = self.build_service(media_start_ms)?;
         self.report(
             "analyzing",
-            "Analyzing the downloaded VOD",
-            Some(duration),
+            if requested_start_ms.is_some() {
+                format!(
+                    "Analyzing VOD slice {} → {}",
+                    progress::timestamp(start_ms),
+                    progress::timestamp(end_ms)
+                )
+            } else {
+                "Analyzing the downloaded VOD".to_owned()
+            },
+            Some(end_ms - start_ms),
             None,
         );
-        let mut work = Box::pin(service.replay_file(&channel, &input, duration));
+        let mut work = Box::pin(service.scan_file(&channel, &input, end_ms, start_ms));
         let mut pulse = tokio::time::interval(Duration::from_secs(2));
         let summary = loop {
             tokio::select! {
                 result = &mut work => break result?,
                 _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
-                _ = pulse.tick() => self.report("analyzing", "Analyzing the downloaded VOD", Some(duration), None),
+                _ = pulse.tick() => self.report(
+                    "analyzing",
+                    if requested_start_ms.is_some() {
+                        format!(
+                            "Analyzing VOD slice {} → {}",
+                            progress::timestamp(start_ms),
+                            progress::timestamp(end_ms)
+                        )
+                    } else {
+                        "Analyzing the downloaded VOD".to_owned()
+                    },
+                    Some(end_ms - start_ms),
+                    None,
+                ),
             }
         };
         drop(work);
@@ -233,7 +312,7 @@ impl LibraryRunner {
             executable: self.config.media.chat_downloader_path.clone(),
         }
         .start(channel, &capture_path.with_extension("chat.jsonl"))?;
-        let service = self.build_service()?;
+        let service = self.build_service(0)?;
         let input = capture_path.to_string_lossy().into_owned();
         let mut analyzed_through = 0_i64;
         let mut total = RunSummary::default();
@@ -325,7 +404,7 @@ impl LibraryRunner {
         });
     }
 
-    fn build_service(&self) -> Result<Service> {
+    fn build_service(&self, media_start_ms: i64) -> Result<Service> {
         let cfg = &self.config;
         let transcriber = Arc::new(ScribbleTranscriber::new(
             cfg.media.ffmpeg_path.clone(),
@@ -335,6 +414,7 @@ impl LibraryRunner {
             &cfg.scribble.language,
             cfg.scribble.enable_vad,
             cfg.scribble.incremental_min_window_seconds,
+            media_start_ms,
         )?);
         let (editorial, audio_analyzer): (
             Arc<dyn EditorialModel>,
@@ -361,6 +441,7 @@ impl LibraryRunner {
                             model: cfg.openai.audio_model.clone(),
                             ffmpeg: cfg.media.ffmpeg_path.clone(),
                             work_dir: cfg.data_dir.join("audio-analysis/openai"),
+                            media_start_ms,
                         }),
                     )
                 }
@@ -379,6 +460,7 @@ impl LibraryRunner {
                             model: cfg.gemini.audio_model.clone(),
                             ffmpeg: cfg.media.ffmpeg_path.clone(),
                             work_dir: cfg.data_dir.join("audio-analysis/gemini"),
+                            media_start_ms,
                         }),
                     )
                 }
@@ -407,14 +489,17 @@ impl LibraryRunner {
                 transcriber,
                 visual_sampler: Arc::new(FfmpegVisualSampler {
                     executable: cfg.media.ffmpeg_path.clone(),
+                    media_start_ms,
                 }),
                 signal_extractor: Arc::new(FfmpegSignalExtractor {
                     executable: cfg.media.ffmpeg_path.clone(),
+                    media_start_ms,
                 }),
                 editorial,
                 audio_analyzer,
                 renderer: Arc::new(FfmpegRenderer {
                     executable: cfg.media.ffmpeg_path.clone(),
+                    media_start_ms,
                 }),
                 object_store,
                 publishers: build_publishers(cfg)?,
@@ -469,6 +554,49 @@ async fn probe_duration_ms(config: &Config, input: &str) -> Result<i64> {
     Ok((seconds * 1_000.0) as i64)
 }
 
+async fn probe_media_bounds(config: &Config, input: &str) -> Result<(i64, i64)> {
+    let output = tokio::process::Command::new(&config.media.ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=start_time,duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            "--",
+            input,
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("run ffprobe for media bounds")?;
+    ensure!(
+        output.status.success(),
+        "ffprobe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout)?;
+    let values = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    ensure!(values.len() >= 2, "ffprobe did not return media bounds");
+    let start_seconds: f64 = values[0].parse().context("parse media start time")?;
+    let duration_seconds: f64 = values[1].parse().context("parse media duration")?;
+    ensure!(
+        start_seconds.is_finite() && start_seconds >= 0.0,
+        "invalid media start time"
+    );
+    ensure!(
+        duration_seconds.is_finite() && duration_seconds > 0.0,
+        "invalid media duration"
+    );
+    let start_ms = (start_seconds * 1_000.0).round() as i64;
+    let duration_ms = (duration_seconds * 1_000.0).round() as i64;
+    Ok((start_ms, start_ms.saturating_add(duration_ms)))
+}
+
 fn validate_channel(channel: &str) -> Result<()> {
     ensure!(
         !channel.is_empty()
@@ -477,6 +605,17 @@ fn validate_channel(channel: &str) -> Result<()> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "invalid Twitch channel login"
     );
+    Ok(())
+}
+
+fn validate_vod_window(duration_ms: i64, start_ms: i64, end_ms: i64) -> Result<()> {
+    ensure!(start_ms >= 0, "VOD slice start must not be negative");
+    ensure!(end_ms > start_ms, "VOD slice end must be after its start");
+    ensure!(
+        end_ms - start_ms >= 5_000,
+        "VOD slice must be at least five seconds"
+    );
+    ensure!(end_ms <= duration_ms, "VOD slice exceeds the VOD duration");
     Ok(())
 }
 
@@ -588,6 +727,28 @@ mod tests {
         assert!(validate_channel("").is_err());
         assert!(validate_channel("streamer/name").is_err());
         assert!(validate_channel("streamer name").is_err());
+    }
+
+    #[test]
+    fn vod_slice_validation_requires_a_bounded_five_second_window() {
+        assert!(validate_vod_window(120_000, 30_000, 45_000).is_ok());
+        assert!(validate_vod_window(120_000, -1, 45_000).is_err());
+        assert!(validate_vod_window(120_000, 45_000, 45_000).is_err());
+        assert!(validate_vod_window(120_000, 30_000, 34_999).is_err());
+        assert!(validate_vod_window(120_000, 30_000, 120_001).is_err());
+    }
+
+    #[test]
+    fn vod_slice_job_source_uses_snake_case_payload_fields() {
+        let source = JobSource::VodSlice {
+            url: "https://www.twitch.tv/videos/123456789".to_owned(),
+            start_ms: 30_000,
+            end_ms: 45_000,
+        };
+        let payload = serde_json::to_value(source).unwrap();
+        assert_eq!(payload["type"], "vod_slice");
+        assert_eq!(payload["start_ms"], 30_000);
+        assert_eq!(payload["end_ms"], 45_000);
     }
 
     #[test]

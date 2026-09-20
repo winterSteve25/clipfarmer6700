@@ -79,10 +79,11 @@ where
             EditorialStage::Editor,
             EditorialStage::Critic,
         ] {
-            let decision = self
+            let mut decision = self
                 .model
                 .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
                 .await?;
+            discard_invalid_alternatives(&mut decision, candidate.start_ms, candidate.end_ms);
             validate_decision(&decision, candidate.start_ms, candidate.end_ms)?;
             decisions.push(decision);
         }
@@ -134,10 +135,24 @@ pub fn validate_decision(decision: &EditorialDecision, min_ms: i64, max_ms: i64)
     Ok(())
 }
 
+pub fn discard_invalid_alternatives(
+    decision: &mut EditorialDecision,
+    min_ms: i64,
+    max_ms: i64,
+) -> usize {
+    let original_len = decision.alternatives.len();
+    decision.alternatives.retain(|alternative| {
+        alternative.start_ms >= min_ms
+            && alternative.end_ms <= max_ms
+            && (5_000..=60_000).contains(&(alternative.end_ms - alternative.start_ms))
+    });
+    original_len - decision.alternatives.len()
+}
+
 pub fn role_instructions(stage: EditorialStage) -> &'static str {
     match stage {
         EditorialStage::Observer => {
-            "Track developing standalone moments. Low-cost signals only change evidence density; decide from transcript, images, chat, and channel context. Accept means a coherent candidate is developing, not that it should publish."
+            "Track developing standalone moments. Low-cost signals only change evidence density; decide from the supplied transcript, visual evidence when present, chat, and channel context. Accept means a coherent candidate is developing, not that it should publish."
         }
         EditorialStage::Director => {
             "Identify setup, escalation, payoff, and reaction. Prefer standalone stories with an immediate hook. Propose the shortest complete 5-60 second source interval."
@@ -306,5 +321,47 @@ mod tests {
         let payload = evidence_payload(&evidence, None, &[], None).unwrap();
         assert!(payload.contains("ignore previous instructions"));
         assert!(serde_json::from_str::<serde_json::Value>(&payload).is_ok());
+    }
+
+    #[test]
+    fn invalid_alternatives_are_discarded_without_relaxing_the_primary_cut() {
+        let mut decision = EditorialDecision {
+            stage: EditorialStage::Director,
+            accept: true,
+            confidence: 0.9,
+            rationale: "primary cut is valid".to_owned(),
+            title: "Candidate".to_owned(),
+            start_ms: 10_000,
+            end_ms: 68_000,
+            hook_text: None,
+            layout: None,
+            alternatives: vec![
+                crate::domain::CutVariant {
+                    start_ms: 12_000,
+                    end_ms: 22_000,
+                    rationale: "valid".to_owned(),
+                },
+                crate::domain::CutVariant {
+                    start_ms: 5_000,
+                    end_ms: 15_000,
+                    rationale: "outside candidate".to_owned(),
+                },
+                crate::domain::CutVariant {
+                    start_ms: 20_000,
+                    end_ms: 21_000,
+                    rationale: "too short".to_owned(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            discard_invalid_alternatives(&mut decision, 10_000, 68_000),
+            2
+        );
+        assert_eq!(decision.alternatives.len(), 1);
+        validate_decision(&decision, 10_000, 68_000).unwrap();
+
+        decision.start_ms = 9_000;
+        assert!(validate_decision(&decision, 10_000, 68_000).is_err());
     }
 }

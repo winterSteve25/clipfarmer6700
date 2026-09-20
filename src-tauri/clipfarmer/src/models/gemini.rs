@@ -101,15 +101,22 @@ pub struct GeminiAudioAnalyzer {
     pub model: String,
     pub ffmpeg: PathBuf,
     pub work_dir: PathBuf,
+    pub media_start_ms: i64,
 }
 
 #[async_trait]
 impl CandidateAudioAnalyzer for GeminiAudioAnalyzer {
     async fn annotate(&self, input_path: &str, candidate: &Candidate) -> Result<AudioAnnotation> {
         ensure!(!self.api_key.is_empty(), "GEMINI_API_KEY is not configured");
-        let audio =
-            extract_candidate_audio(&self.ffmpeg, &self.work_dir, input_path, candidate, 24_000)
-                .await?;
+        let audio = extract_candidate_audio(
+            &self.ffmpeg,
+            &self.work_dir,
+            input_path,
+            candidate,
+            24_000,
+            self.media_start_ms,
+        )
+        .await?;
         let payload = serde_json::json!({
             "model":self.model,
             "store":false,

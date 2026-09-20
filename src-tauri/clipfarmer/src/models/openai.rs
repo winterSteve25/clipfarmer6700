@@ -50,7 +50,7 @@ impl EditorialModel for OpenAiEditorial {
         prior: &[EditorialDecision],
         audio: Option<&AudioAnnotation>,
     ) -> Result<EditorialDecision> {
-        ensure!(!self.api_key.is_empty(), "OPENAI_API_KEY is not configured");
+        ensure!(!self.api_key.is_empty(), "OpenAI API key is not configured");
         let untrusted = evidence_payload(evidence, candidate, prior, audio)?;
         let mut content = vec![serde_json::json!({
             "type":"input_text",
@@ -108,15 +108,22 @@ pub struct OpenAiAudioAnalyzer {
     pub model: String,
     pub ffmpeg: PathBuf,
     pub work_dir: PathBuf,
+    pub media_start_ms: i64,
 }
 
 #[async_trait]
 impl CandidateAudioAnalyzer for OpenAiAudioAnalyzer {
     async fn annotate(&self, input_path: &str, candidate: &Candidate) -> Result<AudioAnnotation> {
-        ensure!(!self.api_key.is_empty(), "OPENAI_API_KEY is not configured");
-        let audio =
-            extract_candidate_audio(&self.ffmpeg, &self.work_dir, input_path, candidate, 24_000)
-                .await?;
+        ensure!(!self.api_key.is_empty(), "OpenAI API key is not configured");
+        let audio = extract_candidate_audio(
+            &self.ffmpeg,
+            &self.work_dir,
+            input_path,
+            candidate,
+            24_000,
+            self.media_start_ms,
+        )
+        .await?;
         let payload = serde_json::json!({
             "model":self.model,
             "messages":[{"role":"user","content":[

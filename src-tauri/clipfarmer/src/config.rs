@@ -129,7 +129,7 @@ fn default_streamlink() -> PathBuf {
     PathBuf::from("streamlink")
 }
 fn default_chat_downloader() -> PathBuf {
-    PathBuf::from("chat_downloader")
+    PathBuf::from("TwitchDownloaderCLI")
 }
 fn default_frame_interval() -> u64 {
     1
@@ -193,17 +193,38 @@ impl Default for ScribbleConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
+    #[default]
     #[serde(rename = "openai", alias = "open_ai")]
     OpenAi,
-    #[default]
     Gemini,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelSelectionConfig {
     #[serde(default)]
     pub provider: ModelProvider,
+    #[serde(default = "default_enabled")]
+    pub visual_evidence: bool,
+    #[serde(default = "default_enabled")]
+    pub audio_analysis: bool,
+    #[serde(default = "default_enabled")]
+    pub chat_evidence: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl Default for ModelSelectionConfig {
+    fn default() -> Self {
+        Self {
+            provider: ModelProvider::default(),
+            visual_evidence: default_enabled(),
+            audio_analysis: default_enabled(),
+            chat_evidence: default_enabled(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -224,7 +245,7 @@ pub struct OpenAiConfig {
 }
 
 fn default_api_key_env() -> String {
-    "OPENAI_API_KEY".to_owned()
+    "CLIPFARMER_OPENAI_KEY".to_owned()
 }
 fn default_observer_model() -> String {
     "gpt-5.6-terra".to_owned()
@@ -497,7 +518,11 @@ mod tests {
     fn defaults_match_the_former_example_configuration() {
         let config = Config::default();
         assert_eq!(config.worker.poll_seconds, 10);
-        assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert_eq!(config.models.provider, ModelProvider::OpenAi);
+        assert_eq!(config.openai.api_key_env, "CLIPFARMER_OPENAI_KEY");
+        assert!(config.models.visual_evidence);
+        assert!(config.models.audio_analysis);
+        assert!(config.models.chat_evidence);
         assert!(config.publishers.dry_run);
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
@@ -513,9 +538,27 @@ mod tests {
     fn empty_frontend_config_uses_example_defaults() {
         let config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(config.worker.poll_seconds, 10);
-        assert_eq!(config.models.provider, ModelProvider::Gemini);
+        assert_eq!(config.models.provider, ModelProvider::OpenAi);
+        assert!(config.models.visual_evidence);
+        assert!(config.models.audio_analysis);
+        assert!(config.models.chat_evidence);
         assert!(config.publishers.youtube);
         assert!(!config.publishers.instagram);
+    }
+
+    #[test]
+    fn model_evidence_toggles_can_define_a_low_token_prototype() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "models": {
+                "visualEvidence": false,
+                "audioAnalysis": false,
+                "chatEvidence": true
+            }
+        }))
+        .unwrap();
+        assert!(!config.models.visual_evidence);
+        assert!(!config.models.audio_analysis);
+        assert!(config.models.chat_evidence);
     }
 
     #[test]

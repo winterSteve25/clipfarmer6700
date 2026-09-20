@@ -23,6 +23,8 @@ use std::{
 use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+const VOD_SLICE_PREROLL_MS: i64 = 120_000;
+
 #[async_trait]
 pub trait Transcriber: Send + Sync {
     async fn transcribe(
@@ -77,6 +79,7 @@ pub trait Publisher: Send + Sync {
 pub struct ScribbleTranscriber {
     pub ffmpeg: PathBuf,
     pub work_dir: PathBuf,
+    pub media_start_ms: i64,
     engine: Arc<Mutex<Scribble<WhisperBackend>>>,
     language: Option<String>,
     enable_vad: bool,
@@ -92,6 +95,7 @@ impl ScribbleTranscriber {
         language: &str,
         enable_vad: bool,
         incremental_min_window_seconds: usize,
+        media_start_ms: i64,
     ) -> Result<Self> {
         let model_path = model_path
             .to_str()
@@ -108,6 +112,7 @@ impl ScribbleTranscriber {
         Ok(Self {
             ffmpeg,
             work_dir,
+            media_start_ms,
             engine: Arc::new(Mutex::new(engine)),
             language,
             enable_vad,
@@ -132,7 +137,7 @@ impl Transcriber for ScribbleTranscriber {
         let wav_path = self.work_dir.join(format!("{id}.wav"));
         let ffmpeg = tokio::process::Command::new(&self.ffmpeg)
             .args(["-y", "-v", "error", "-ss"])
-            .arg(seconds(start_ms))
+            .arg(seconds(relative_ms(start_ms, self.media_start_ms)))
             .args(["-t"])
             .arg(seconds(end_ms - start_ms))
             .args(["-i", input_path, "-vn", "-ac", "1", "-ar", "16000"])
@@ -250,11 +255,13 @@ fn token_confidence(tokens: &[ScribbleJsonToken]) -> Option<f64> {
 #[derive(Debug, Clone)]
 pub struct FfmpegVisualSampler {
     pub executable: PathBuf,
+    pub media_start_ms: i64,
 }
 
 #[derive(Debug, Clone)]
 pub struct FfmpegSignalExtractor {
     pub executable: PathBuf,
+    pub media_start_ms: i64,
 }
 
 #[async_trait]
@@ -264,7 +271,7 @@ impl SignalExtractor for FfmpegSignalExtractor {
         ensure!(end_ms > start_ms, "invalid signal window");
         let result = tokio::process::Command::new(&self.executable)
             .args(["-v", "info", "-ss"])
-            .arg(seconds(start_ms))
+            .arg(seconds(relative_ms(start_ms, self.media_start_ms)))
             .args(["-t"])
             .arg(seconds(end_ms - start_ms))
             .args([
@@ -348,7 +355,7 @@ impl VisualSampler for FfmpegVisualSampler {
         let pattern = output_dir.join("frame-%06d.jpg");
         let result = tokio::process::Command::new(&self.executable)
             .args(["-y", "-v", "error", "-ss"])
-            .arg(seconds(start_ms))
+            .arg(seconds(relative_ms(start_ms, self.media_start_ms)))
             .args(["-t"])
             .arg(seconds(end_ms - start_ms))
             .args(["-i", input_path, "-vf"])
@@ -383,6 +390,7 @@ impl VisualSampler for FfmpegVisualSampler {
 #[derive(Debug, Clone)]
 pub struct FfmpegRenderer {
     pub executable: PathBuf,
+    pub media_start_ms: i64,
 }
 
 #[async_trait]
@@ -427,7 +435,10 @@ impl Renderer for FfmpegRenderer {
         let filter = filters.join(",");
         let rendered = tokio::process::Command::new(&self.executable)
             .args(["-y", "-v", "error", "-ss"])
-            .arg(seconds(manifest.source_start_ms))
+            .arg(seconds(relative_ms(
+                manifest.source_start_ms,
+                self.media_start_ms,
+            )))
             .args(["-t"])
             .arg(seconds(manifest.source_end_ms - manifest.source_start_ms))
             .args(["-i", &manifest.input_path, "-vf", &filter, "-r"])
@@ -469,6 +480,10 @@ impl Renderer for FfmpegRenderer {
 
 fn seconds(ms: i64) -> String {
     format!("{:.3}", ms as f64 / 1_000.0)
+}
+
+fn relative_ms(timestamp_ms: i64, media_start_ms: i64) -> i64 {
+    timestamp_ms.saturating_sub(media_start_ms).max(0)
 }
 
 fn ffmpeg_filter_path(path: &Path) -> String {
@@ -665,6 +680,32 @@ impl TwitchVodSource {
         url: &str,
         channel_override: Option<&str>,
     ) -> Result<PreparedTwitchVod> {
+        self.prepare_window(url, channel_override, None).await
+    }
+
+    pub async fn prepare_slice(
+        &self,
+        url: &str,
+        channel_override: Option<&str>,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<PreparedTwitchVod> {
+        ensure!(start_ms >= 0, "VOD slice start must not be negative");
+        ensure!(end_ms > start_ms, "VOD slice end must be after its start");
+        ensure!(
+            end_ms - start_ms >= 5_000,
+            "VOD slice must be at least five seconds"
+        );
+        self.prepare_window(url, channel_override, Some((start_ms, end_ms)))
+            .await
+    }
+
+    async fn prepare_window(
+        &self,
+        url: &str,
+        channel_override: Option<&str>,
+        media_window: Option<(i64, i64)>,
+    ) -> Result<PreparedTwitchVod> {
         let id = twitch_vod_id(url)?.to_owned();
         let canonical_url = format!("https://www.twitch.tv/videos/{id}");
         let cache_dir = self.cache_root.join(&id);
@@ -700,7 +741,12 @@ impl TwitchVodSource {
         };
         fs::write(&channel_path, format!("{channel_login}\n"))?;
 
-        let media_path = cache_dir.join("source.ts");
+        let media_path = match media_window {
+            Some((start_ms, end_ms)) => {
+                cache_dir.join(format!("source-{start_ms}-{end_ms}-preroll.ts"))
+            }
+            None => cache_dir.join("source.ts"),
+        };
         if fs::metadata(&media_path).is_ok_and(|metadata| metadata.len() > 0) {
             let size = fs::metadata(&media_path)?.len();
             progress::info(format!(
@@ -709,18 +755,25 @@ impl TwitchVodSource {
                 progress::bytes(size)
             ));
         } else {
-            self.download_media(&canonical_url, &media_path).await?;
+            self.download_media(&canonical_url, &media_path, media_window)
+                .await?;
         }
         let chat_path = media_path.with_extension("chat.jsonl");
-        if chat_path.exists() {
-            let size = fs::metadata(&chat_path)?.len();
+        let cached_chat_size = fs::metadata(&chat_path).ok().map(|metadata| metadata.len());
+        if cached_chat_size.is_some_and(|size| size > 0) {
+            let size = cached_chat_size.expect("cached chat size was checked");
             progress::info(format!(
                 "Using cached chat {} ({})",
                 chat_path.display(),
                 progress::bytes(size)
             ));
         } else {
-            self.download_chat(&canonical_url, &chat_path).await?;
+            if cached_chat_size.is_some() {
+                progress::warning("Cached chat is empty; retrying bounded chat download");
+                let _ = fs::remove_file(&chat_path);
+            }
+            self.download_chat(&canonical_url, &chat_path, media_window)
+                .await?;
         }
         Ok(PreparedTwitchVod {
             id,
@@ -747,12 +800,27 @@ impl TwitchVodSource {
         channel_from_streamlink_metadata(&metadata, expected_id)
     }
 
-    async fn download_media(&self, url: &str, destination: &Path) -> Result<()> {
+    async fn download_media(
+        &self,
+        url: &str,
+        destination: &Path,
+        media_window: Option<(i64, i64)>,
+    ) -> Result<()> {
         let temporary =
             destination.with_file_name(format!("source-{}.part.ts", uuid::Uuid::new_v4()));
         let download = ByteProgress::start("Downloading Twitch VOD", &temporary);
-        let output = tokio::process::Command::new(&self.streamlink)
-            .args(["--force", "--progress", "no", "--output"])
+        let mut command = tokio::process::Command::new(&self.streamlink);
+        command.args(["--force", "--progress", "no"]);
+        if let Some((start_ms, end_ms)) = media_window {
+            let download_start_ms = start_ms.saturating_sub(VOD_SLICE_PREROLL_MS);
+            command
+                .args(["--hls-start-offset"])
+                .arg(seconds(download_start_ms))
+                .args(["--stream-segmented-duration"])
+                .arg(seconds(end_ms - download_start_ms));
+        }
+        let output = command
+            .args(["--output"])
             .arg(&temporary)
             .arg(url)
             .arg("best")
@@ -780,39 +848,114 @@ impl TwitchVodSource {
         Ok(())
     }
 
-    async fn download_chat(&self, url: &str, destination: &Path) -> Result<()> {
+    async fn download_chat(
+        &self,
+        url: &str,
+        destination: &Path,
+        media_window: Option<(i64, i64)>,
+    ) -> Result<()> {
         let temporary =
-            destination.with_file_name(format!("chat-{}.part.jsonl", uuid::Uuid::new_v4()));
+            destination.with_file_name(format!("chat-{}.part.json", uuid::Uuid::new_v4()));
         let download = ByteProgress::start("Downloading timestamped Twitch chat", &temporary);
-        let output = tokio::process::Command::new(&self.chat_downloader)
-            .arg(url)
-            .args(["--output"])
+        let mut command = tokio::process::Command::new(&self.chat_downloader);
+        command
+            .args(["chatdownload", "--id", twitch_vod_id(url)?, "--output"])
             .arg(&temporary)
-            .args(["--message_groups", "messages"])
-            .stdout(Stdio::null())
+            .args([
+                "--threads",
+                "2",
+                "--collision",
+                "Overwrite",
+                "--banner",
+                "false",
+            ]);
+        if let Some((start_ms, end_ms)) = media_window {
+            command
+                .args(["--beginning"])
+                .arg(format!("{start_ms}ms"))
+                .args(["--ending"])
+                .arg(format!("{end_ms}ms"));
+        }
+        let output = command
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .output()
             .await
             .context("download Twitch VOD chat")?;
         if !output.status.success() {
-            download.failed(format!("chat_downloader exited with {}", output.status));
+            download.failed(format!("TwitchDownloaderCLI exited with {}", output.status));
             let _ = fs::remove_file(&temporary);
-            anyhow::bail!(
-                "chat_downloader could not download Twitch VOD chat: {}",
+            let diagnostics = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+            if media_window.is_some() {
+                progress::warning(format!(
+                    "bounded chat download failed; continuing without chat: {}",
+                    diagnostics.trim()
+                ));
+                fs::write(destination, [])?;
+                return Ok(());
+            }
+            anyhow::bail!(
+                "TwitchDownloaderCLI could not download Twitch VOD chat: {}",
+                diagnostics
             );
         }
         if temporary.exists() {
             let transferred = fs::metadata(&temporary)?.len();
-            fs::rename(&temporary, destination)?;
-            download.done_with_size(transferred, destination.display().to_string());
+            let message_count = normalize_twitch_downloader_chat(&temporary, destination)?;
+            let _ = fs::remove_file(&temporary);
+            download.done_with_size(transferred, format!("{message_count} messages"));
         } else {
             fs::write(destination, [])?;
             download.done_with_size(0, "no chat messages");
         }
         Ok(())
     }
+}
+
+fn normalize_twitch_downloader_chat(input: &Path, destination: &Path) -> Result<usize> {
+    let root: Value =
+        serde_json::from_slice(&fs::read(input)?).context("parse TwitchDownloaderCLI chat JSON")?;
+    let comments = root
+        .get("comments")
+        .and_then(Value::as_array)
+        .context("TwitchDownloaderCLI chat JSON omitted comments")?;
+    let mut normalized = Vec::new();
+    let mut message_count = 0;
+    for comment in comments {
+        let Some(at_seconds) = comment
+            .get("content_offset_seconds")
+            .and_then(Value::as_f64)
+        else {
+            continue;
+        };
+        let Some(message) = comment.pointer("/message/body").and_then(Value::as_str) else {
+            continue;
+        };
+        if message.trim().is_empty() {
+            continue;
+        }
+        let author = comment
+            .pointer("/commenter/name")
+            .or_else(|| comment.pointer("/commenter/display_name"))
+            .and_then(Value::as_str);
+        serde_json::to_writer(
+            &mut normalized,
+            &serde_json::json!({
+                "time_in_seconds":at_seconds,
+                "message":message,
+                "author":author,
+            }),
+        )?;
+        normalized.push(b'\n');
+        message_count += 1;
+    }
+    fs::write(destination, normalized)?;
+    Ok(message_count)
 }
 
 fn twitch_vod_id(url: &str) -> Result<&str> {
@@ -1227,10 +1370,13 @@ mod tests {
         fs::write(&input, b"fake media").unwrap();
         let output_dir = root.join("frames");
 
-        let samples = FfmpegVisualSampler { executable }
-            .sample(input.to_str().unwrap(), &output_dir, 5_000, 15_000, 5)
-            .await
-            .unwrap();
+        let samples = FfmpegVisualSampler {
+            executable,
+            media_start_ms: 0,
+        }
+        .sample(input.to_str().unwrap(), &output_dir, 5_000, 15_000, 5)
+        .await
+        .unwrap();
 
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].at_ms, 5_000);
@@ -1257,10 +1403,13 @@ mod tests {
         let input = root.join("input.mp4");
         fs::write(&input, b"fake media").unwrap();
 
-        let signals = FfmpegSignalExtractor { executable }
-            .extract(input.to_str().unwrap(), 0, 10_000)
-            .await
-            .unwrap();
+        let signals = FfmpegSignalExtractor {
+            executable,
+            media_start_ms: 0,
+        }
+        .extract(input.to_str().unwrap(), 0, 10_000)
+        .await
+        .unwrap();
 
         assert!((signals.audio_energy - 0.5).abs() < f64::EPSILON);
         assert!((signals.scene_change_rate - 0.1).abs() < f64::EPSILON);
@@ -1314,13 +1463,13 @@ mod tests {
         let streamlink = root.join("streamlink");
         fs::write(
             &streamlink,
-            "#!/bin/sh\nif [ \"$1\" = \"--json\" ]; then\n  printf '%s\\n' '{\"metadata\":{\"id\":\"123456789\",\"author\":\"TwitchDev\"}}'\n  exit 0\nfi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nprintf 'fake-vod' > \"$output\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--json\" ]; then\n  printf '%s\\n' '{\"metadata\":{\"id\":\"123456789\",\"author\":\"TwitchDev\"}}'\n  exit 0\nfi\npartial=false\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--hls-start-offset\" ]; then partial=true; fi\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nif [ \"$partial\" = \"true\" ]; then printf 'partial-vod' > \"$output\"; else printf 'fake-vod' > \"$output\"; fi\n",
         )
         .unwrap();
-        let chat_downloader = root.join("chat_downloader");
+        let chat_downloader = root.join("TwitchDownloaderCLI");
         fs::write(
             &chat_downloader,
-            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nprintf '%s\\n' '{\"time_in_seconds\":1,\"message\":\"hello\"}' > \"$output\"\n",
+            "#!/bin/sh\npartial=false\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--beginning\" ]; then partial=true; fi\n  if [ \"$1\" = \"--output\" ]; then shift; output=$1; fi\n  shift\ndone\nif [ \"$partial\" = \"true\" ]; then printf '%s\\n' '{\"comments\":[{\"content_offset_seconds\":30001,\"commenter\":{\"name\":\"slice-user\"},\"message\":{\"body\":\"slice\"}}]}' > \"$output\"; else printf '%s\\n' '{\"comments\":[{\"content_offset_seconds\":1,\"commenter\":{\"name\":\"full-user\"},\"message\":{\"body\":\"hello\"}}]}' > \"$output\"; fi\n",
         )
         .unwrap();
         for executable in [&streamlink, &chat_downloader] {
@@ -1338,6 +1487,28 @@ mod tests {
         assert_eq!(prepared.channel_login, "twitchdev");
         assert_eq!(fs::read(&prepared.media_path).unwrap(), b"fake-vod");
         assert!(prepared.media_path.with_extension("chat.jsonl").exists());
+
+        let sliced = source
+            .prepare_slice(
+                "https://www.twitch.tv/videos/123456789",
+                None,
+                30_000,
+                45_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sliced.media_path.file_name().unwrap(),
+            "source-30000-45000-preroll.ts"
+        );
+        assert_eq!(fs::read(&sliced.media_path).unwrap(), b"partial-vod");
+        let sliced_chat_path = sliced.media_path.with_extension("chat.jsonl");
+        assert!(sliced_chat_path.exists());
+        assert!(
+            fs::read_to_string(sliced_chat_path)
+                .unwrap()
+                .contains("slice")
+        );
 
         let cached = TwitchVodSource {
             streamlink: root.join("missing-streamlink"),
@@ -1433,6 +1604,7 @@ mod twitch_ingestion_tests {
         let frame_dir = root.join("frames");
         let frames = FfmpegVisualSampler {
             executable: PathBuf::from(&ffmpeg),
+            media_start_ms: 0,
         }
         .sample(&input_path, &frame_dir, start_ms, start_ms + duration_ms, 5)
         .await
@@ -1441,6 +1613,7 @@ mod twitch_ingestion_tests {
 
         let signals = FfmpegSignalExtractor {
             executable: PathBuf::from(&ffmpeg),
+            media_start_ms: 0,
         }
         .extract(&input_path, start_ms, start_ms + duration_ms)
         .await
@@ -1456,6 +1629,7 @@ mod twitch_ingestion_tests {
             "auto",
             true,
             30,
+            0,
         )
         .unwrap();
         let transcript = transcriber
@@ -1576,6 +1750,7 @@ mod twitch_live_ingestion_tests {
         let input_path = media_path.to_string_lossy().into_owned();
         let frames = FfmpegVisualSampler {
             executable: ffmpeg.clone(),
+            media_start_ms: 0,
         }
         .sample(&input_path, &root.join("frames"), 0, duration_ms, 5)
         .await
@@ -1583,6 +1758,7 @@ mod twitch_live_ingestion_tests {
         assert!(!frames.is_empty());
         let signals = FfmpegSignalExtractor {
             executable: ffmpeg.clone(),
+            media_start_ms: 0,
         }
         .extract(&input_path, 0, duration_ms)
         .await
@@ -1595,6 +1771,7 @@ mod twitch_live_ingestion_tests {
             "auto",
             true,
             30,
+            0,
         )
         .unwrap();
         let transcript = transcriber

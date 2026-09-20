@@ -9,7 +9,7 @@ use crate::{
     manifest::validate_safe_path,
 };
 use anyhow::{Context, Result, ensure};
-use std::{fs, path::Path};
+use std::{collections::HashSet, fs, path::Path};
 
 pub(crate) async fn extract_candidate_audio(
     ffmpeg: &Path,
@@ -57,16 +57,21 @@ pub(crate) fn validate_audio_annotation(annotation: &AudioAnnotation) -> Result<
 }
 
 pub(crate) fn select_visuals(samples: &[VisualSample], limit: usize) -> Vec<&VisualSample> {
-    if samples.len() <= limit {
-        return samples.iter().collect();
+    let mut timestamps = HashSet::new();
+    let unique = samples
+        .iter()
+        .filter(|sample| timestamps.insert(sample.at_ms))
+        .collect::<Vec<_>>();
+    if unique.len() <= limit {
+        return unique;
     }
     if limit <= 1 {
-        return samples.last().into_iter().collect();
+        return unique.last().copied().into_iter().collect();
     }
     (0..limit)
         .map(|index| {
-            let position = index * (samples.len() - 1) / (limit - 1);
-            &samples[position]
+            let position = index * (unique.len() - 1) / (limit - 1);
+            unique[position]
         })
         .collect()
 }
@@ -116,5 +121,27 @@ mod tests {
         assert_eq!(selected.first().unwrap().at_ms, 0);
         assert_eq!(selected.last().unwrap().at_ms, 99);
         assert_eq!(selected.len(), 24);
+    }
+
+    #[test]
+    fn visual_selection_deduplicates_overlapping_window_samples() {
+        let samples = [0, 1, 1, 2, 2, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(index, at_ms)| VisualSample {
+                at_ms,
+                path: index.to_string(),
+                region: "full_frame".to_owned(),
+                reason: "baseline".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let selected = select_visuals(&samples, 24);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|sample| sample.at_ms)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
     }
 }

@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "twitch-capture",
-        "width": 800,
-        "height": 600
+        "title": "ClipFarmer — Editorial Console",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 820,
+        "minHeight": 640
       }
     ],
     "security": {

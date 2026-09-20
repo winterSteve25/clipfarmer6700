@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+  font-family: "Manrope", Inter, system-ui, sans-serif;
+  color: #e8e7f1; background: #0b0a10; font-synthesis: none;
+  text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+  --bg: #0b0a10; --sidebar: #111016; --panel: #15141b; --border: #2b2934;
+  --border-soft: #23212b; --text: #efedf7; --muted: #898593; --violet: #8b5cf6;
+  --green: #35d49a; --red: #f06a7d; --amber: #e6b85c;
+}
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; min-width: 352px; min-height: 100%; }
+body { background: var(--bg); overflow: hidden; }
+button, input, select { font: inherit; } button { color: inherit; }
+.icon { display: block; flex: 0 0 auto; transform: scale(1.1); transform-origin: center; }

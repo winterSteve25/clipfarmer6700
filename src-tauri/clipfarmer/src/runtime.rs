@@ -9,7 +9,7 @@ use crate::{
         LocalObjectStore, ObjectStore, Publisher, S3CommandStore, ScribbleTranscriber,
         TwitchCapture, TwitchChatCapture, TwitchVodSource,
     },
-    config::{Config, ModelProvider},
+    config::{Config, ModelProvider, ScribbleModel},
     editorial::{
         CandidateAudioAnalyzer, DeterministicAudioAnnotation, DeterministicEditorial,
         EditorialModel,
@@ -55,6 +55,9 @@ pub struct JobProgress {
     pub message: String,
     pub elapsed_ms: u64,
     pub captured_ms: Option<i64>,
+    pub completed_units: Option<usize>,
+    pub total_units: Option<usize>,
+    pub transferred_bytes: Option<u64>,
     pub summary: Option<RunSummaryDto>,
 }
 
@@ -67,6 +70,7 @@ pub struct RunSummaryDto {
     pub candidates_rejected: usize,
     pub posts_completed: usize,
     pub publish_failures: usize,
+    pub estimated_api_cost_usd: Option<f64>,
 }
 
 impl From<&RunSummary> for RunSummaryDto {
@@ -78,6 +82,7 @@ impl From<&RunSummary> for RunSummaryDto {
             candidates_rejected: value.candidates_rejected,
             posts_completed: value.posts_completed,
             publish_failures: value.publish_failures,
+            estimated_api_cost_usd: value.estimated_api_cost_usd,
         }
     }
 }
@@ -90,7 +95,8 @@ pub struct RunResult {
 
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
-    pub transcription: PathBuf,
+    pub large_turbo_transcription: PathBuf,
+    pub tiny_transcription: PathBuf,
     pub voice_activity_detection: PathBuf,
 }
 
@@ -145,7 +151,10 @@ impl LibraryRunner {
         progress: impl Fn(JobProgress) + Send + Sync + 'static,
     ) -> Result<Self> {
         config.data_dir = data_dir;
-        config.scribble.model_path = model_paths.transcription;
+        config.scribble.model_path = match config.scribble.model_variant {
+            ScribbleModel::LargeTurbo => model_paths.large_turbo_transcription,
+            ScribbleModel::Tiny => model_paths.tiny_transcription,
+        };
         config.scribble.vad_model_path = model_paths.voice_activity_detection;
         config.validate()?;
         fs::create_dir_all(config.data_dir.join("outputs"))?;
@@ -165,9 +174,11 @@ impl LibraryRunner {
         &self,
         source: JobSource,
         mut cancellation: Cancellation,
+        resume_from_ms: i64,
     ) -> Result<RunResult> {
         match source {
             JobSource::Channel { channel } => self.run_live(&channel, &mut cancellation).await,
+<<<<<<< HEAD
             JobSource::Vod { url } => self.run_vod(&url, &mut cancellation).await,
             JobSource::VodSlice {
                 url,
@@ -201,6 +212,17 @@ impl LibraryRunner {
         requested_start_ms: Option<i64>,
         requested_end_ms: Option<i64>,
         cancellation: &mut Cancellation,
+=======
+            JobSource::Vod { url } => self.run_vod(&url, &mut cancellation, resume_from_ms).await,
+        }
+    }
+
+    async fn run_vod(
+        &self,
+        url: &str,
+        cancellation: &mut Cancellation,
+        resume_from_ms: i64,
+>>>>>>> realui
     ) -> Result<RunResult> {
         self.report(
             "preparing_vod",
@@ -213,6 +235,7 @@ impl LibraryRunner {
             chat_downloader: self.config.media.chat_downloader_path.clone(),
             cache_root: self.config.data_dir.join("vods"),
         };
+<<<<<<< HEAD
         let prepared = match (requested_start_ms, requested_end_ms) {
             (Some(start_ms), Some(end_ms)) => tokio::select! {
                 result = source.prepare_slice(url, None, start_ms, end_ms) => result?,
@@ -223,6 +246,13 @@ impl LibraryRunner {
                 _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
             },
             _ => anyhow::bail!("VOD slice start and end must be provided together"),
+=======
+        let prepared = tokio::select! {
+            result = source.prepare_with_progress(url, None, |transferred_bytes| {
+                self.report_download_progress(transferred_bytes);
+            }) => result?,
+            _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
+>>>>>>> realui
         };
         self.report(
             "preparing_vod",
@@ -251,15 +281,23 @@ impl LibraryRunner {
         let service = self.build_service(media_start_ms)?;
         self.report(
             "analyzing",
+<<<<<<< HEAD
             if requested_start_ms.is_some() {
                 format!(
                     "Analyzing VOD slice {} → {}",
                     progress::timestamp(start_ms),
                     progress::timestamp(end_ms)
+=======
+            if resume_from_ms > 0 {
+                format!(
+                    "Resuming VOD analysis near {} seconds",
+                    resume_from_ms / 1_000
+>>>>>>> realui
                 )
             } else {
                 "Analyzing the downloaded VOD".to_owned()
             },
+<<<<<<< HEAD
             Some(end_ms - start_ms),
             None,
         );
@@ -284,6 +322,30 @@ impl LibraryRunner {
                     None,
                 ),
             }
+=======
+            Some(duration),
+            None,
+        );
+        let mut work = Box::pin(service.scan_file_with_progress(
+            &channel,
+            &input,
+            duration,
+            resume_from_ms.min(duration).max(0),
+            |completed, total, summary| {
+                self.report_progress(
+                    "analyzing",
+                    format!("Analyzed window {completed} of {total}"),
+                    Some(duration),
+                    Some(summary),
+                    completed,
+                    total,
+                );
+            },
+        ));
+        let summary = tokio::select! {
+            result = &mut work => result?,
+            _ = cancellation.cancelled() => anyhow::bail!(Cancelled),
+>>>>>>> realui
         };
         drop(work);
         Ok(RunResult { channel, summary })
@@ -298,8 +360,8 @@ impl LibraryRunner {
             .join(channel)
             .join(format!("{}.ts", uuid::Uuid::new_v4()));
         self.report(
-            "starting",
-            format!("Starting live capture for {channel}"),
+            "starting_capture",
+            format!("Starting Twitch video capture for {channel}"),
             None,
             None,
         );
@@ -308,6 +370,12 @@ impl LibraryRunner {
         }
         .start(channel, &capture_path)
         .await?;
+        self.report(
+            "starting_chat",
+            format!("Starting Twitch chat capture for {channel}"),
+            None,
+            None,
+        );
         let mut chat = TwitchChatCapture {
             executable: self.config.media.chat_downloader_path.clone(),
         }
@@ -342,7 +410,22 @@ impl LibraryRunner {
                     let minimum_advance = self.config.worker.observer_step_seconds as i64 * 1_000;
                     if duration >= analyzed_through + minimum_advance {
                         let scan_start = analyzed_through.saturating_sub(120_000);
-                        let scan = service.scan_file(channel, &input, duration, scan_start);
+                        let scan = service.scan_file_with_progress(
+                            channel,
+                            &input,
+                            duration,
+                            scan_start,
+                            |completed, total, summary| {
+                                self.report_progress(
+                                    "analyzing",
+                                    format!("Analyzed window {completed} of {total}"),
+                                    Some(duration),
+                                    Some(summary),
+                                    completed,
+                                    total,
+                                );
+                            },
+                        );
                         let pass = tokio::select! {
                             result = scan => result?,
                             _ = cancellation.cancelled() => {
@@ -368,11 +451,21 @@ impl LibraryRunner {
                         Some(duration),
                         Some(&total),
                     );
-                    let scan = service.scan_file(
+                    let scan = service.scan_file_with_progress(
                         channel,
                         &input,
                         duration,
                         analyzed_through.saturating_sub(120_000),
+                        |completed, total, summary| {
+                            self.report_progress(
+                                "analyzing",
+                                format!("Analyzed window {completed} of {total}"),
+                                Some(duration),
+                                Some(summary),
+                                completed,
+                                total,
+                            );
+                        },
                     );
                     let pass = tokio::select! {
                         result = scan => result?,
@@ -400,12 +493,58 @@ impl LibraryRunner {
             message: message.into(),
             elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             captured_ms,
+            completed_units: None,
+            total_units: None,
+            transferred_bytes: None,
+            summary: summary.map(RunSummaryDto::from),
+        });
+    }
+
+    fn report_download_progress(&self, transferred_bytes: u64) {
+        (self.progress)(JobProgress {
+            phase: "preparing_vod".to_owned(),
+            message: "Downloading the Twitch VOD".to_owned(),
+            elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            captured_ms: None,
+            completed_units: None,
+            total_units: None,
+            transferred_bytes: Some(transferred_bytes),
+            summary: None,
+        });
+    }
+
+    fn report_progress(
+        &self,
+        phase: impl Into<String>,
+        message: impl Into<String>,
+        captured_ms: Option<i64>,
+        summary: Option<&RunSummary>,
+        completed_units: usize,
+        total_units: usize,
+    ) {
+        (self.progress)(JobProgress {
+            phase: phase.into(),
+            message: message.into(),
+            elapsed_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            captured_ms,
+            completed_units: Some(completed_units),
+            total_units: Some(total_units),
+            transferred_bytes: None,
             summary: summary.map(RunSummaryDto::from),
         });
     }
 
     fn build_service(&self, media_start_ms: i64) -> Result<Service> {
         let cfg = &self.config;
+        self.report(
+            "loading_transcription",
+            format!(
+                "Loading {:?} transcription model",
+                cfg.scribble.model_variant
+            ),
+            None,
+            None,
+        );
         let transcriber = Arc::new(ScribbleTranscriber::new(
             cfg.media.ffmpeg_path.clone(),
             &cfg.scribble.model_path,
@@ -416,6 +555,16 @@ impl LibraryRunner {
             cfg.scribble.incremental_min_window_seconds,
             media_start_ms,
         )?);
+        self.report(
+            "configuring_models",
+            if self.deterministic_models {
+                "Selecting deterministic editorial models".to_owned()
+            } else {
+                format!("Configuring {:?} editorial models", cfg.models.provider)
+            },
+            None,
+            None,
+        );
         let (editorial, audio_analyzer): (
             Arc<dyn EditorialModel>,
             Arc<dyn CandidateAudioAnalyzer>,
@@ -435,13 +584,18 @@ impl LibraryRunner {
                             director_model: cfg.openai.director_model.clone(),
                             editor_model: cfg.openai.editor_model.clone(),
                             critic_model: cfg.openai.critic_model.clone(),
+                            db_path: cfg.db_path(),
                         }),
                         Arc::new(OpenAiAudioAnalyzer {
                             api_key,
                             model: cfg.openai.audio_model.clone(),
                             ffmpeg: cfg.media.ffmpeg_path.clone(),
                             work_dir: cfg.data_dir.join("audio-analysis/openai"),
+<<<<<<< HEAD
                             media_start_ms,
+=======
+                            db_path: cfg.db_path(),
+>>>>>>> realui
                         }),
                     )
                 }
@@ -466,6 +620,12 @@ impl LibraryRunner {
                 }
             }
         };
+        self.report(
+            "configuring_staging",
+            format!("Configuring {} object staging", cfg.staging.provider),
+            None,
+            None,
+        );
         let object_store: Arc<dyn ObjectStore> = match cfg.staging.provider.as_str() {
             "local" => Arc::new(LocalObjectStore {
                 root: cfg.data_dir.join("staging"),
@@ -483,6 +643,23 @@ impl LibraryRunner {
             }),
             provider => anyhow::bail!("unsupported staging provider {provider}"),
         };
+        self.report(
+            "configuring_publishers",
+            if cfg.publishers.dry_run {
+                "Configuring publishers in dry-run mode"
+            } else {
+                "Configuring live publishers"
+            },
+            None,
+            None,
+        );
+        let publishers = build_publishers(cfg)?;
+        self.report(
+            "opening_database",
+            "Opening the pipeline database",
+            None,
+            None,
+        );
         Service::new(
             cfg.clone(),
             ServiceDependencies {
@@ -502,7 +679,7 @@ impl LibraryRunner {
                     media_start_ms,
                 }),
                 object_store,
-                publishers: build_publishers(cfg)?,
+                publishers,
             },
         )
     }
@@ -523,6 +700,10 @@ fn add_summary(total: &mut RunSummary, pass: &RunSummary) {
     total.candidates_rejected += pass.candidates_rejected;
     total.posts_completed += pass.posts_completed;
     total.publish_failures += pass.publish_failures;
+    if let Some(cost) = pass.estimated_api_cost_usd {
+        total.estimated_api_cost_usd =
+            Some(total.estimated_api_cost_usd.unwrap_or_default() + cost);
+    }
 }
 
 async fn probe_duration_ms(config: &Config, input: &str) -> Result<i64> {

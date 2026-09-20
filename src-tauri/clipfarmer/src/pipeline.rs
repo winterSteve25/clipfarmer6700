@@ -9,7 +9,10 @@ use crate::{
         AudioAnnotation, Candidate, ChannelProfile, ChatEvent, ClipState, EditorialDecision,
         EditorialStage, EvidenceWindow, LocalSignals, Outcome, SignalEvidence, TranscriptSegment,
     },
-    editorial::{CandidateAudioAnalyzer, EditorialModel, ReviewResult},
+    editorial::{
+        CandidateAudioAnalyzer, EditorialModel, ReviewResult, normalize_decision_bounds,
+        skipped_audio_annotation,
+    },
     evidence::EvidenceRing,
     manifest::build_manifest,
     progress::{self, Step},
@@ -19,7 +22,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::{fs, path::Path, sync::Arc};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunSummary {
     pub windows_observed: usize,
     pub candidates_reviewed: usize,
@@ -27,6 +30,7 @@ pub struct RunSummary {
     pub candidates_rejected: usize,
     pub posts_completed: usize,
     pub publish_failures: usize,
+    pub estimated_api_cost_usd: Option<f64>,
 }
 
 struct EvidenceSlice<'a> {
@@ -100,6 +104,24 @@ impl Service {
         input_path: &str,
         duration_ms: i64,
         scan_start_ms: i64,
+    ) -> Result<RunSummary> {
+        self.scan_file_with_progress(
+            channel_id,
+            input_path,
+            duration_ms,
+            scan_start_ms,
+            |_, _, _| {},
+        )
+        .await
+    }
+
+    pub async fn scan_file_with_progress(
+        &self,
+        channel_id: &str,
+        input_path: &str,
+        duration_ms: i64,
+        scan_start_ms: i64,
+        mut on_progress: impl FnMut(usize, usize, &RunSummary),
     ) -> Result<RunSummary> {
         ensure!(duration_ms >= 5_000, "input is too short to contain a clip");
         ensure!(Path::new(input_path).exists(), "input media does not exist");
@@ -225,6 +247,12 @@ impl Service {
                 .editorial
                 .decide(EditorialStage::Observer, &window, None, &[], None)
                 .await?;
+            let (observer, observer_repaired) =
+                normalize_decision_bounds(observer, window.start_ms, window.end_ms);
+            if observer_repaired {
+                progress::warning("Observer returned invalid boundaries; normalized the decision");
+            }
+            crate::editorial::validate_decision(&observer, window.start_ms, window.end_ms)?;
             observer_step.done(format!(
                 "{} at {:.0}% confidence",
                 if observer.accept {
@@ -268,6 +296,12 @@ impl Service {
                 &mut summary,
             )
             .await?;
+            summary.estimated_api_cost_usd = self.store.estimated_model_cost_usd(&session_id)?;
+            on_progress(
+                window_number.max(0) as usize,
+                total_windows.max(1) as usize,
+                &summary,
+            );
             if cursor == duration_ms {
                 break;
             }
@@ -290,6 +324,7 @@ impl Service {
             &mut summary,
         )
         .await?;
+        summary.estimated_api_cost_usd = self.store.estimated_model_cost_usd(&session_id)?;
 
         let recovery = self.retry_pending(input_path).await?;
         if recovery.posts_completed > 0 || recovery.publish_failures > 0 {
@@ -457,6 +492,7 @@ impl Service {
             "candidate is not ready"
         );
 
+<<<<<<< HEAD
         let audio = if self.cfg.models.audio_analysis {
             let audio_step = Step::start("Analyzing candidate audio");
             let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
@@ -471,9 +507,13 @@ impl Service {
             unavailable_audio_annotation(&candidate)
         };
         let audio_for_model = self.cfg.models.audio_analysis.then_some(&audio);
+=======
+>>>>>>> realui
         let mut decisions = Vec::new();
-        for stage in [
+        let director_step = Step::start(format!(
+            "Running {} ({})",
             EditorialStage::Director,
+<<<<<<< HEAD
             EditorialStage::Editor,
             EditorialStage::Critic,
         ] {
@@ -531,8 +571,97 @@ impl Service {
                 decision.confidence * 100.0
             ));
             decisions.push(decision);
+=======
+            self.editorial.model_name(EditorialStage::Director)
+        ));
+        let director = self
+            .editorial
+            .decide(
+                EditorialStage::Director,
+                evidence,
+                Some(&candidate),
+                &[],
+                None,
+            )
+            .await?;
+        let (director, director_repaired) =
+            normalize_decision_bounds(director, candidate.start_ms, candidate.end_ms);
+        if director_repaired {
+            progress::warning(
+                "Director returned invalid boundaries; normalized this candidate instead of stopping the run",
+            );
+>>>>>>> realui
         }
-        let final_decision = decisions.last().cloned().expect("three decisions");
+        crate::editorial::validate_decision(&director, candidate.start_ms, candidate.end_ms)?;
+        self.store.record_decision(
+            &candidate.id,
+            self.editorial.model_name(EditorialStage::Director),
+            &director,
+        )?;
+        director_step.done(format!(
+            "{} at {:.0}% confidence",
+            if director.accept {
+                "accepted"
+            } else {
+                "rejected"
+            },
+            director.confidence * 100.0
+        ));
+        let confidently_rejected = !director.accept && director.confidence >= 0.85;
+        decisions.push(director);
+        let audio = if confidently_rejected {
+            progress::info("Skipping audio and final review after confident director rejection");
+            skipped_audio_annotation()
+        } else {
+            let audio_step = Step::start("Analyzing candidate audio");
+            let audio = self.audio_analyzer.annotate(input_path, &candidate).await?;
+            audio_step.done(format!(
+                "{:.0}% confidence, {} detected events",
+                audio.confidence * 100.0,
+                audio.nonverbal_events.len()
+            ));
+            audio
+        };
+        if !confidently_rejected {
+            for stage in [EditorialStage::Editor, EditorialStage::Critic] {
+                let editorial_step = Step::start(format!(
+                    "Running {stage} ({})",
+                    self.editorial.model_name(stage)
+                ));
+                let decision = self
+                    .editorial
+                    .decide(stage, evidence, Some(&candidate), &decisions, Some(&audio))
+                    .await?;
+                let (decision, decision_repaired) =
+                    normalize_decision_bounds(decision, candidate.start_ms, candidate.end_ms);
+                if decision_repaired {
+                    progress::warning(format!(
+                        "{stage} returned invalid boundaries; normalized this candidate instead of stopping the run"
+                    ));
+                }
+                crate::editorial::validate_decision(
+                    &decision,
+                    candidate.start_ms,
+                    candidate.end_ms,
+                )?;
+                self.store.record_decision(
+                    &candidate.id,
+                    self.editorial.model_name(stage),
+                    &decision,
+                )?;
+                editorial_step.done(format!(
+                    "{} at {:.0}% confidence",
+                    if decision.accept {
+                        "accepted"
+                    } else {
+                        "rejected"
+                    },
+                    decision.confidence * 100.0
+                ));
+                decisions.push(decision);
+            }
+        }
+        let final_decision = decisions.last().cloned().expect("director decision");
         let accepted = final_decision.accept;
         let next = if accepted {
             ClipState::Accepted

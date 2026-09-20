@@ -1,0 +1,19 @@
+.settings-view { max-width: 968px; margin: 0 auto; padding: 35.2px 30.8px 55px; }
+.settings-intro { max-width: 638px; margin-bottom: 25.3px; }
+.settings-intro h2 { font-size: 22px; margin-bottom: 8.8px; }
+.settings-intro p { margin: 0; color: #7f7a87; font-size: 13.2px; line-height: 1.65; }
+.account-list { display: grid; gap: 11px; }
+.account-card { border: 1.1px solid var(--border); border-radius: 12.1px; background: rgba(21, 20, 27, .86); overflow: hidden; transition: border-color .18s ease; }
+.account-card.connected { border-color: rgba(53, 212, 154, .25); }
+.account-summary { min-height: 91.3px; display: grid; grid-template-columns: 39.6px 1fr auto; gap: 15.4px; align-items: center; padding: 17.6px 19.8px; }
+.account-summary > .platform-icon { width: 39.6px; height: 39.6px; border-radius: 9.9px; font-size: 12.1px; }
+.account-copy { min-width: 0; }.account-copy > div { display: flex; align-items: center; flex-wrap: wrap; gap: 9.9px; }.account-copy h3 { margin: 0; font-size: 14.3px; }.account-copy p { margin: 5.5px 0 0; color: #706c78; font-size: 12px; }
+.connection-state { display: inline-flex; align-items: center; gap: 5.5px; color: #77727e; font-size: 11px; font-weight: 700; }.connection-state i { width: 6.6px; height: 6.6px; border-radius: 50%; background: #5f5b67; }.connection-state.connected { color: #69d7af; }.connection-state.connected i { background: var(--green); box-shadow: 0 0 8.8px rgba(53, 212, 154, .4); }
+.connect-button, .disconnect-button { min-height: 35.2px; padding: 0 13.2px; border-radius: 7.7px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.connect-button { border: 1.1px solid #6747a6; color: #e5d8ff; background: rgba(122, 79, 207, .21); }.connect-button:hover { background: rgba(122, 79, 207, .31); }.disconnect-button { border: 1.1px solid #393540; color: #918c99; background: #15131a; }.disconnect-button:hover { color: #d9a1aa; border-color: #68404a; }
+.connect-button:disabled, .disconnect-button:disabled { opacity: .45; cursor: not-allowed; }
+.account-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13.2px; padding: 17.6px 19.8px 19.8px 74.8px; border-top: 1.1px solid var(--border-soft); background: rgba(11, 10, 16, .22); }
+.account-form-note { grid-column: 1 / -1; display: flex; align-items: center; gap: 8.8px; color: #8c8794; font-size: 11.5px; }.account-form-note .icon { color: #9c75ef; }
+.account-form label > span { display: block; margin-bottom: 7.7px; color: #aaa6b2; font-size: 12px; font-weight: 600; }
+.account-form input { width: 100%; height: 38.5px; padding: 0 11px; border: 1.1px solid #33303a; border-radius: 7.7px; outline: 0; background: #111015; color: #d7d3dd; font: 12px "DM Mono", monospace; }.account-form input:focus { border-color: #7852c4; box-shadow: 0 0 0 3.3px rgba(120, 82, 196, .12); }
+.account-form-actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 13.2px; margin-top: 2.2px; }.account-form-actions small { color: #625e69; font-size: 11px; }

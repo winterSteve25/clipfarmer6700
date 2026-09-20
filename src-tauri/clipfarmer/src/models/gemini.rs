@@ -1,3 +1,7 @@
+//! Gemini implementations of editorial review and candidate audio analysis.
+//! This module connects provider-neutral traits to Gemini APIs.
+//! It translates evidence and audio into the same structured results used by other providers.
+
 use super::{base64, extract_candidate_audio, select_visuals, validate_audio_annotation};
 use crate::{
     adapters::curl_json_with_secret_header,

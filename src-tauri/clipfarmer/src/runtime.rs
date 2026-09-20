@@ -1,3 +1,7 @@
+//! Cancellable host runtime for live and VOD processing jobs.
+//! This module translates job requests into configured pipeline services and progress events.
+//! It is the integration boundary for GUI or other hosts that need progress and cancellation.
+
 use crate::{
     Service, ServiceDependencies,
     adapters::{
@@ -544,4 +548,59 @@ fn build_publishers(cfg: &Config) -> Result<Vec<Arc<dyn Publisher>>> {
         )));
     }
     Ok(publishers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_handle_marks_receiver_cancelled() {
+        let (handle, cancellation) = CancellationHandle::new();
+        assert!(!cancellation.is_cancelled());
+        handle.cancel();
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn summary_conversion_preserves_all_counts() {
+        let summary = RunSummary {
+            windows_observed: 1,
+            candidates_reviewed: 2,
+            candidates_accepted: 3,
+            candidates_rejected: 4,
+            posts_completed: 5,
+            publish_failures: 6,
+        };
+
+        let dto = RunSummaryDto::from(&summary);
+        assert_eq!(dto.windows_observed, 1);
+        assert_eq!(dto.candidates_reviewed, 2);
+        assert_eq!(dto.candidates_accepted, 3);
+        assert_eq!(dto.candidates_rejected, 4);
+        assert_eq!(dto.posts_completed, 5);
+        assert_eq!(dto.publish_failures, 6);
+    }
+
+    #[test]
+    fn channel_validation_rejects_values_that_could_escape_source_paths() {
+        assert!(validate_channel("streamer_42").is_ok());
+        assert!(validate_channel("").is_err());
+        assert!(validate_channel("streamer/name").is_err());
+        assert!(validate_channel("streamer name").is_err());
+    }
+
+    #[test]
+    fn deterministic_mode_builds_fake_publishers_without_provider_credentials() {
+        let mut config = Config::default();
+        config.publishers.dry_run = true;
+        config.publishers.youtube = true;
+        config.publishers.instagram = false;
+        config.publishers.tiktok_drafts = false;
+        config.publishers.twitch_clips = false;
+
+        let publishers = build_publishers(&config).unwrap();
+        assert_eq!(publishers.len(), 1);
+        assert_eq!(publishers[0].platform(), "youtube");
+    }
 }

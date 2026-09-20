@@ -1,3 +1,7 @@
+//! End-to-end orchestration from media observation through publishing.
+//! This module coordinates replaceable adapters while enforcing the candidate lifecycle.
+//! It is the main application service: each scan moves evidence through analysis, review, rendering, and delivery.
+
 use crate::{
     adapters::{ObjectStore, Publisher, Renderer, SignalExtractor, Transcriber, VisualSampler},
     config::Config,
@@ -811,4 +815,154 @@ fn stable_source_id(input_path: &str) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(canonical.to_string_lossy().as_bytes());
     Ok(format!("{:x}", hash.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile() -> ChannelProfile {
+        ChannelProfile::empty("channel")
+    }
+
+    #[test]
+    fn evidence_window_includes_only_data_overlapping_the_requested_window() {
+        let transcripts = vec![
+            TranscriptSegment {
+                session_id: "session".to_owned(),
+                start_ms: 1_000,
+                end_ms: 3_000,
+                text: "inside".to_owned(),
+                confidence: Some(0.9),
+                no_speech_probability: None,
+                is_final: true,
+            },
+            TranscriptSegment {
+                session_id: "session".to_owned(),
+                start_ms: 8_000,
+                end_ms: 9_000,
+                text: "outside".to_owned(),
+                confidence: Some(0.9),
+                no_speech_probability: None,
+                is_final: true,
+            },
+        ];
+        let chat = vec![
+            ChatEvent {
+                session_id: "session".to_owned(),
+                at_ms: 2_000,
+                author_hash: None,
+                text: "inside".to_owned(),
+            },
+            ChatEvent {
+                session_id: "session".to_owned(),
+                at_ms: 7_000,
+                author_hash: None,
+                text: "outside".to_owned(),
+            },
+        ];
+        let visuals = vec![
+            crate::domain::VisualSample {
+                at_ms: 2_000,
+                path: "inside.jpg".to_owned(),
+                region: "full_frame".to_owned(),
+                reason: "test".to_owned(),
+            },
+            crate::domain::VisualSample {
+                at_ms: 7_000,
+                path: "outside.jpg".to_owned(),
+                region: "full_frame".to_owned(),
+                reason: "test".to_owned(),
+            },
+        ];
+        let window = evidence_window(
+            "session",
+            "channel",
+            0,
+            5_000,
+            &EvidenceSlice {
+                transcripts: &transcripts,
+                chat: &chat,
+                visuals: &visuals,
+                profile: &profile(),
+                local_signals: Some(LocalSignals {
+                    audio_energy: 0.75,
+                    scene_change_rate: 0.5,
+                }),
+            },
+        );
+
+        assert_eq!(window.transcripts.len(), 1);
+        assert_eq!(window.chat.len(), 1);
+        assert_eq!(window.visuals.len(), 1);
+        assert_eq!(window.signals[0].text, "inside");
+        assert_eq!(window.signals[0].chat_rate, 0.2);
+    }
+
+    #[test]
+    fn observer_candidate_is_clamped_and_collects_overlapping_transcript() {
+        let transcripts = vec![TranscriptSegment {
+            session_id: "session".to_owned(),
+            start_ms: 1_000,
+            end_ms: 3_000,
+            text: "the payoff".to_owned(),
+            confidence: None,
+            no_speech_probability: None,
+            is_final: true,
+        }];
+        let observer = EditorialDecision {
+            stage: EditorialStage::Observer,
+            accept: true,
+            confidence: 0.8,
+            rationale: "test".to_owned(),
+            title: "test".to_owned(),
+            start_ms: -1_000,
+            end_ms: 4_000,
+            hook_text: None,
+            layout: None,
+            alternatives: Vec::new(),
+        };
+
+        let candidate = candidate_from_observer(
+            "session",
+            "channel",
+            "source",
+            &transcripts,
+            &observer,
+            20_000,
+        )
+        .unwrap();
+
+        assert_eq!(candidate.start_ms, 0);
+        assert_eq!(candidate.end_ms, 5_000);
+        assert_eq!(candidate.transcript, "the payoff");
+        assert_eq!(candidate.state, ClipState::Emerging);
+    }
+
+    #[test]
+    fn chat_sidecar_supports_downloader_and_normalized_chat_events() {
+        let root = std::env::temp_dir().join(format!("clipfarmer-chat-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("capture.ts");
+        fs::write(&input, b"fake media").unwrap();
+        fs::write(
+            input.with_extension("chat.jsonl"),
+            concat!(
+                "{\"time_in_seconds\":1.5,\"message\":\"hello\",\"author\":\"viewer\"}\n",
+                "{\"session_id\":\"old\",\"at_ms\":2500,\"author_hash\":null,\"text\":\"world\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let events = load_chat_sidecar(input.to_str().unwrap(), "session").unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].at_ms, 1_500);
+        assert_eq!(events[0].session_id, "session");
+        assert_eq!(events[0].text, "hello");
+        assert_eq!(events[0].author_hash.as_deref().unwrap().len(), 16);
+        assert_eq!(events[1].at_ms, 2_500);
+        assert_eq!(events[1].text, "world");
+        let _ = fs::remove_dir_all(root);
+    }
 }

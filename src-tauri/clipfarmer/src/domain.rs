@@ -1,3 +1,7 @@
+//! Core data types and lifecycle rules shared across the clip-processing pipeline.
+//! This module keeps the contracts between analysis, editorial review, and publishing explicit.
+//! It also holds invariants such as valid clip durations, states, and idempotency keys.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

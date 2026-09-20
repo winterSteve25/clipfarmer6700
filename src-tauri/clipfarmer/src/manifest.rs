@@ -1,3 +1,7 @@
+//! Render manifests, caption generation, and subtitle serialization.
+//! This module validates and describes the exact media artifact sent to renderers.
+//! It keeps rendering deterministic by turning editorial decisions and transcripts into one contract.
+
 use crate::domain::{Candidate, CaptionCue, EditManifest, EditorialDecision, TranscriptSegment};
 use anyhow::{Result, bail, ensure};
 use std::path::{Component, Path};

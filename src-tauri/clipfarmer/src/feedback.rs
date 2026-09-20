@@ -1,3 +1,7 @@
+//! Outcome normalization and channel-profile updates from published clip metrics.
+//! This module turns platform performance into reusable editorial context.
+//! It provides the learning path from observed post results back into future decisions.
+
 use crate::domain::{ChannelProfile, Outcome, OutcomeMetrics};
 use anyhow::Result;
 use async_trait::async_trait;

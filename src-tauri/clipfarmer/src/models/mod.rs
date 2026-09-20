@@ -1,4 +1,5 @@
 //! Hosted model providers behind the provider-neutral editorial traits.
+//! Shared helpers live here, while provider-specific request and response handling stays in submodules.
 
 pub mod gemini;
 pub mod openai;

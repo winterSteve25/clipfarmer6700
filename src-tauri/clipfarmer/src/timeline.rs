@@ -1,3 +1,7 @@
+//! Timeline, media-retention, transcript-deduplication, and candidate-maturation utilities.
+//! This module manages incremental media analysis and the timing of developing moments.
+//! These helpers preserve continuity across overlapping windows and live-stream discontinuities.
+
 use crate::domain::{Candidate, ClipState, TimestampMs, TranscriptSegment, merge_candidates};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};

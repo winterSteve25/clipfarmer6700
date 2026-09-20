@@ -1,0 +1,4 @@
+# whisper-rs-sys's bindgen output is incompatible with the system Clang/glibc headers.
+# Use its checked-in bindings so builds and tests remain reproducible.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = { value = "1", force = true }

@@ -1,3 +1,7 @@
+//! Provider-neutral editorial stages and decision validation.
+//! This module defines one review contract for deterministic and hosted model implementations.
+//! It separates the pipeline's review workflow from any particular model vendor or API.
+
 use crate::domain::{
     AudioAnnotation, Candidate, ChannelProfile, ClipState, EditorialDecision, EditorialStage,
     EvidenceWindow,

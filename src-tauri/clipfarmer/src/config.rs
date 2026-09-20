@@ -1,3 +1,7 @@
+//! Configuration for workers, media tools, models, staging, and publishers.
+//! This module centralizes defaults and validation so hosts can configure the backend safely.
+//! Keeping these settings together also gives runtime construction one validated source of truth.
+
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::path::PathBuf;
